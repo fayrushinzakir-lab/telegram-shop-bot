@@ -2,45 +2,38 @@ name: Telegram Product Poster
 
 on:
   schedule:
-    # Запуск каждый час (UTC)
     - cron: "0 * * * *"
-  workflow_dispatch:  # Ручной запуск из интерфейса GitHub
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  workflow_dispatch:
 
 jobs:
   post-products:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: write
 
     steps:
-      # 1. Клонируем репозиторий
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      # 2. Устанавливаем Python 3.11
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 3. Устанавливаем зависимости
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # 4. Запускаем парсер
       - name: Run parser and post to Telegram
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: python script.py
 
-      # 5. Сохраняем обновлённый posted.json в репозиторий
       - name: Commit updated posted.json
         run: |
           git config user.name "github-actions[bot]"
