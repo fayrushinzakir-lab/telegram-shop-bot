@@ -1,4 +1,4 @@
 requests==2.31.0
 beautifulsoup4==4.12.3
-python-telegram-bot==13.15
+python-telegram-bot==20.7
 lxml==5.2.1
