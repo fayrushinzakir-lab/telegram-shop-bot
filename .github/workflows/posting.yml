@@ -1,0 +1,63 @@
+name: Telegram Product Poster
+
+on:
+  schedule:
+    # Запуск каждый час (UTC)
+    - cron: "0 * * * *"
+  workflow_dispatch:  # Ручной запуск из интерфейса GitHub
+
+jobs:
+  post-products:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Клонируем репозиторий
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Устанавливаем Python 3.11
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 3. Кешируем зависимости (ускоряет сборку)
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # 4. Устанавливаем зависимости
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 5. Восстанавливаем posted.json из кеша Actions
+      #    (чтобы антидубли сохранялись между запусками)
+      - name: Restore posted.json cache
+        uses: actions/cache@v4
+        with:
+          path: posted.json
+          key: posted-json-${{ github.run_id }}
+          restore-keys: |
+            posted-json-
+
+      # 6. Запускаем парсер
+      - name: Run parser and post to Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python script.py
+
+      # 7. Сохраняем обновлённый posted.json в репозиторий
+      - name: Commit updated posted.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add posted.json
+          git diff --cached --quiet || git commit -m "chore: update posted.json [skip ci]"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
