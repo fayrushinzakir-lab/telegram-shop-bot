@@ -12,7 +12,7 @@ import asyncio
 import random
 from datetime import datetime
 from bs4 import BeautifulSoup
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -241,10 +241,12 @@ def parse_all() -> list:
 
 def format_caption(product: dict) -> str:
     return (
-        f"💻 {product['name']}\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📞 +998909161817\n"
-        f"💬 @Dmitriy_WhiteFactory"
+        f"💻 <b>{product['name']}</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏪 <b>White Factory</b>\n"
+        f"📍 Малика, здание Меркато\n\n"
+        f"👨‍💼 Дмитрий: +998909161817\n"
+        f"👨‍💼 Данил: +998909018519"
     )
 
 def is_valid_image_url(url: str) -> bool:
@@ -258,16 +260,35 @@ def is_valid_image_url(url: str) -> bool:
 async def post_product(bot: Bot, product: dict) -> bool:
     caption = format_caption(product)
     img_url = product.get("img", "")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Написать нам", url="https://t.me/Dmitriy_WhiteFactory")]
+    ])
     try:
         if is_valid_image_url(img_url):
-            await bot.send_photo(chat_id=CHANNEL_ID, photo=img_url, caption=caption)
+            await bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=img_url,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
         else:
-            await bot.send_message(chat_id=CHANNEL_ID, text=caption)
+            await bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
         return True
     except TelegramError as e:
         log.error(f"Telegram ошибка '{product['name']}': {e}")
         try:
-            await bot.send_message(chat_id=CHANNEL_ID, text=caption)
+            await bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
             return True
         except TelegramError as e2:
             log.error(f"Повторная ошибка: {e2}")
