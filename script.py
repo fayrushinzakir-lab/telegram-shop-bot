@@ -302,8 +302,8 @@ async def main():
         return
 
     # Проверяем — время ли постить
-    # if not should_post_now():
-    #     return
+    if not should_post_now():
+       return
 
     bot = Bot(token=TELEGRAM_TOKEN)
     posted = load_posted()
