@@ -1,6 +1,7 @@
 """
 Telegram Bot: Парсер товаров с узбекских магазинов
-Парсит все категории: ноутбуки, аксессуары, комплектующие и т.д.
+- 2 поста в день в случайное время
+- Без цены и ссылки на источник
 """
 
 import os
@@ -8,6 +9,8 @@ import json
 import logging
 import requests
 import asyncio
+import random
+from datetime import datetime
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import TelegramError
@@ -18,8 +21,9 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN", "")
 CHANNEL_ID          = os.environ.get("CHANNEL_ID", "")
 POSTED_FILE         = "posted.json"
+STATE_FILE          = "state.json"
 REQUEST_TIMEOUT     = 15
-DELAY_BETWEEN_POSTS = 3
+POSTS_PER_DAY       = 2
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -54,7 +58,6 @@ PCMARKET_PAGES = [
     "https://pcmarket.uz/catalog/naushniki-i-garnitury/",
     "https://pcmarket.uz/catalog/veb-kamery/",
     "https://pcmarket.uz/catalog/planshety/",
-    "https://pcmarket.uz/catalog/igrovye-pristavki/",
 ]
 
 NOTEBOOKOFF_PAGES = [
@@ -69,31 +72,87 @@ NOTEBOOKOFF_PAGES = [
     "https://notebookoff.uz/monitory",
 ]
 
-# ─── Универсальные селекторы ──────────────────────────────────────────────────
-
 SELECTORS = [
     {
         "card":  ".product-item, .catalog-item, .product-card, .product",
         "name":  ".product-title, .catalog-item__name, .name, h3, h2",
-        "price": ".product-price, .price, .catalog-item__price, [class*='price']",
         "img":   "img",
         "link":  "a",
     },
     {
         "card":  "article, .item, li.product, .card",
         "name":  "h1, h2, h3, .title, .name, [class*='name']",
-        "price": ".price, [class*='price'], .cost, .amount",
         "img":   "img",
         "link":  "a",
     },
     {
         "card":  "[class*='product'], [class*='item'], [class*='card']",
         "name":  "[class*='title'], [class*='name'], h2, h3",
-        "price": "[class*='price'], [class*='cost'], [class*='sum']",
         "img":   "img",
         "link":  "a",
     },
 ]
+
+# ─── Состояние (сколько постов сегодня) ───────────────────────────────────────
+
+def load_state() -> dict:
+    if not os.path.exists(STATE_FILE):
+        return {"date": "", "count": 0}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"date": "", "count": 0}
+
+
+def save_state(state: dict) -> None:
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        log.error(f"Не удалось сохранить state.json: {e}")
+
+
+def should_post_now() -> bool:
+    """
+    Проверяет: нужно ли постить сейчас.
+    Логика: каждый час скрипт запускается, но постит только 2 раза в день
+    в случайные часы (выбираются в начале дня и сохраняются в state.json).
+    """
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    current_hour = datetime.utcnow().hour
+    state = load_state()
+
+    # Новый день — выбираем 2 случайных часа для постинга
+    if state.get("date") != today:
+        hours = random.sample(range(8, 22), POSTS_PER_DAY)  # между 8 и 22 UTC
+        state = {
+            "date": today,
+            "count": 0,
+            "hours": sorted(hours),
+        }
+        save_state(state)
+        log.info(f"Новый день. Часы для постов: {state['hours']} UTC")
+
+    # Уже опубликовали 2 поста сегодня
+    if state.get("count", 0) >= POSTS_PER_DAY:
+        log.info(f"Сегодня уже опубликовано {POSTS_PER_DAY} поста. Пропускаем.")
+        return False
+
+    # Текущий час совпадает с одним из запланированных
+    planned_hours = state.get("hours", [])
+    if current_hour in planned_hours:
+        log.info(f"Час {current_hour} UTC — время постить!")
+        return True
+
+    log.info(f"Час {current_hour} UTC — не время. Запланировано: {planned_hours} UTC")
+    return False
+
+
+def increment_post_count() -> None:
+    state = load_state()
+    state["count"] = state.get("count", 0) + 1
+    save_state(state)
 
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 
@@ -143,7 +202,6 @@ def safe_attr(el, attr: str, base_url: str = "") -> str:
 # ─── Универсальный парсер страницы ───────────────────────────────────────────
 
 def parse_page(url: str, base: str) -> list:
-    """Парсит одну страницу и возвращает список товаров."""
     soup = get_soup(url)
     if not soup:
         return []
@@ -156,26 +214,15 @@ def parse_page(url: str, base: str) -> list:
         products = []
         for card in cards[:30]:
             try:
-                name  = safe_text(card.select_one(sel["name"]))
-                price = safe_text(card.select_one(sel["price"]))
-                img_el = card.select_one(sel["img"])
-                img   = safe_attr(img_el, "data-src", base) or safe_attr(img_el, "src", base)
-                link_el = card.select_one(sel["link"])
-                href  = safe_attr(link_el, "href", base)
+                name    = safe_text(card.select_one(sel["name"]))
+                img_el  = card.select_one(sel["img"])
+                img     = safe_attr(img_el, "data-src", base) or safe_attr(img_el, "src", base)
+                href    = safe_attr(card.select_one(sel["link"]), "href", base)
 
-                # Пропускаем карточки без названия или ссылки
-                if not name or not href:
-                    continue
-                # Пропускаем слишком короткие названия (навигация, кнопки)
-                if len(name) < 5:
+                if not name or not href or len(name) < 5:
                     continue
 
-                products.append({
-                    "name":  name,
-                    "price": price or "Цена не указана",
-                    "img":   img,
-                    "url":   href,
-                })
+                products.append({"name": name, "img": img, "url": href})
             except Exception as e:
                 log.debug(f"Ошибка карточки на {url}: {e}")
 
@@ -187,55 +234,32 @@ def parse_page(url: str, base: str) -> list:
     return []
 
 
-# ─── Парсеры по сайтам ───────────────────────────────────────────────────────
+def parse_all() -> list:
+    """Парсит все сайты и возвращает общий список уникальных товаров."""
+    all_products = []
 
-def parse_nout() -> list:
-    log.info("=== Парсинг nout.uz ===")
-    products = []
-    for page_url in NOUT_PAGES:
-        items = parse_page(page_url, "https://nout.uz")
-        products.extend(items)
-    # Убираем дубли по URL
-    seen = set()
-    unique = []
-    for p in products:
-        if p["url"] not in seen:
-            seen.add(p["url"])
-            unique.append(p)
-    log.info(f"nout.uz: итого {len(unique)} уникальных товаров")
-    return unique
+    sources = [
+        ("https://nout.uz",        NOUT_PAGES,        "nout.uz"),
+        ("https://pcmarket.uz",    PCMARKET_PAGES,    "pcmarket.uz"),
+        ("https://notebookoff.uz", NOTEBOOKOFF_PAGES, "notebookoff.uz"),
+    ]
 
+    for base, pages, label in sources:
+        log.info(f"=== Парсинг {label} ===")
+        seen_urls = set()
+        for page_url in pages:
+            try:
+                items = parse_page(page_url, base)
+                for item in items:
+                    if item["url"] not in seen_urls:
+                        seen_urls.add(item["url"])
+                        all_products.append(item)
+            except Exception as e:
+                log.error(f"Ошибка парсера {label} на {page_url}: {e}")
 
-def parse_pcmarket() -> list:
-    log.info("=== Парсинг pcmarket.uz ===")
-    products = []
-    for page_url in PCMARKET_PAGES:
-        items = parse_page(page_url, "https://pcmarket.uz")
-        products.extend(items)
-    seen = set()
-    unique = []
-    for p in products:
-        if p["url"] not in seen:
-            seen.add(p["url"])
-            unique.append(p)
-    log.info(f"pcmarket.uz: итого {len(unique)} уникальных товаров")
-    return unique
+        log.info(f"{label}: итого {len(seen_urls)} уникальных товаров")
 
-
-def parse_notebookoff() -> list:
-    log.info("=== Парсинг notebookoff.uz ===")
-    products = []
-    for page_url in NOTEBOOKOFF_PAGES:
-        items = parse_page(page_url, "https://notebookoff.uz")
-        products.extend(items)
-    seen = set()
-    unique = []
-    for p in products:
-        if p["url"] not in seen:
-            seen.add(p["url"])
-            unique.append(p)
-    log.info(f"notebookoff.uz: итого {len(unique)} уникальных товаров")
-    return unique
+    return all_products
 
 
 # ─── Telegram ────────────────────────────────────────────────────────────────
@@ -243,8 +267,6 @@ def parse_notebookoff() -> list:
 def format_caption(product: dict) -> str:
     return (
         f"💻 {product['name']}\n\n"
-        f"💰 {product['price']}\n\n"
-        f"🔗 {product['url']}\n\n"
         f"━━━━━━━━━━━━━━━\n"
         f"📞 +998909161817\n"
         f"💬 @Dmitriy_WhiteFactory"
@@ -267,7 +289,7 @@ async def post_product(bot: Bot, product: dict) -> bool:
         if is_valid_image_url(img_url):
             await bot.send_photo(chat_id=CHANNEL_ID, photo=img_url, caption=caption)
         else:
-            await bot.send_message(chat_id=CHANNEL_ID, text=caption, disable_web_page_preview=False)
+            await bot.send_message(chat_id=CHANNEL_ID, text=caption)
         return True
     except TelegramError as e:
         log.error(f"Telegram ошибка '{product['name']}': {e}")
@@ -286,42 +308,35 @@ async def main():
         log.error("Не заданы TELEGRAM_TOKEN или CHANNEL_ID!")
         return
 
+    # Проверяем — время ли постить
+    if not should_post_now():
+        return
+
     bot = Bot(token=TELEGRAM_TOKEN)
     posted = load_posted()
 
-    log.info("─── Запуск парсинга всех сайтов ───")
-    all_products = []
+    # Собираем все товары
+    all_products = parse_all()
+    log.info(f"Всего товаров: {len(all_products)}, уже опубликовано: {len(posted)}")
 
-    for parser, label in [
-        (parse_nout,        "nout.uz"),
-        (parse_pcmarket,    "pcmarket.uz"),
-        (parse_notebookoff, "notebookoff.uz"),
-    ]:
-        try:
-            items = parser()
-            all_products.extend(items)
-        except Exception as e:
-            log.error(f"Критическая ошибка парсера {label}: {e}")
+    # Фильтруем новые
+    new_products = [p for p in all_products if p.get("url") and p["url"] not in posted]
+    log.info(f"Новых товаров для публикации: {len(new_products)}")
 
-    log.info(f"Всего товаров со всех сайтов: {len(all_products)}")
-    log.info(f"Уже опубликовано ранее: {len(posted)}")
+    if not new_products:
+        log.info("Нет новых товаров.")
+        return
 
-    published_count = 0
-    for product in all_products:
-        url = product.get("url", "")
-        if not url or url in posted:
-            continue
+    # Выбираем 1 случайный товар и публикуем
+    product = random.choice(new_products)
+    log.info(f"Публикуем: {product['name'][:60]}")
 
-        log.info(f"Публикуем: {product['name'][:60]}")
-        success = await post_product(bot, product)
-
-        if success:
-            posted.add(url)
-            published_count += 1
-            save_posted(posted)
-            await asyncio.sleep(DELAY_BETWEEN_POSTS)
-
-    log.info(f"─── Готово. Опубликовано новых товаров: {published_count} ───")
+    success = await post_product(bot, product)
+    if success:
+        posted.add(product["url"])
+        save_posted(posted)
+        increment_post_count()
+        log.info("─── Пост опубликован успешно ───")
 
 
 if __name__ == "__main__":
