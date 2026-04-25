@@ -30,46 +30,43 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
 }
 
-# ─── Все страницы для парсинга ────────────────────────────────────────────────
+# ─── Реальные URL категорий (проверены) ──────────────────────────────────────
 
 NOUT_PAGES = [
     "https://nout.uz",
-    "https://nout.uz/noutbuki",
-    "https://nout.uz/aksessuari",
-    "https://nout.uz/sumki-i-ryukzaki",
-    "https://nout.uz/myshi",
-    "https://nout.uz/klaviatury",
+    "https://nout.uz/brand/asus/",
+    "https://nout.uz/brand/hp/",
+    "https://nout.uz/brand/lenovo/",
+    "https://nout.uz/brand/acer/",
+    "https://nout.uz/brand/dell/",
+    "https://nout.uz/brand/msi/",
+    "https://nout.uz/brand/apple/",
     "https://nout.uz/naushniki",
-    "https://nout.uz/veb-kamery",
-    "https://nout.uz/colonki",
-    "https://nout.uz/komplektuyushchie",
     "https://nout.uz/monitory",
-    "https://nout.uz/planshety",
 ]
 
 PCMARKET_PAGES = [
     "https://pcmarket.uz",
-    "https://pcmarket.uz/catalog/noutbuki/",
-    "https://pcmarket.uz/catalog/aksessuary/",
-    "https://pcmarket.uz/catalog/klaviatury/",
-    "https://pcmarket.uz/catalog/myshi/",
-    "https://pcmarket.uz/catalog/monitory/",
-    "https://pcmarket.uz/catalog/komplektuyushchie/",
-    "https://pcmarket.uz/catalog/naushniki-i-garnitury/",
-    "https://pcmarket.uz/catalog/veb-kamery/",
-    "https://pcmarket.uz/catalog/planshety/",
+    "https://pcmarket.uz/cat/noutbuki/",
+    "https://pcmarket.uz/cat/noutbuki/igrovye-noutbuki/",
+    "https://pcmarket.uz/cat/noutbuki/ofisnye-noutbuki/",
+    "https://pcmarket.uz/cat/monitors/",
+    "https://pcmarket.uz/cat/klaviatury/",
+    "https://pcmarket.uz/cat/myshi/",
+    "https://pcmarket.uz/cat/naushniki/",
+    "https://pcmarket.uz/cat/kolonki/",
+    "https://pcmarket.uz/cat/kompyutery/",
+    "https://pcmarket.uz/cat/kompyutery/igrovye/",
+    "https://pcmarket.uz/cat/printer/",
+    "https://pcmarket.uz/cat/monobloki/",
+    "https://pcmarket.uz/cat/fleshki/",
+    "https://pcmarket.uz/cat/pereferiya-dlya-pk/cumki-dlya-noutbuka/",
+    "https://pcmarket.uz/cat/kovriki-dlya-myshki/",
 ]
 
 NOTEBOOKOFF_PAGES = [
     "https://notebookoff.uz",
     "https://notebookoff.uz/catalog",
-    "https://notebookoff.uz/noutbuki",
-    "https://notebookoff.uz/aksessuary",
-    "https://notebookoff.uz/myshi",
-    "https://notebookoff.uz/klaviatury",
-    "https://notebookoff.uz/sumki",
-    "https://notebookoff.uz/naushniki",
-    "https://notebookoff.uz/monitory",
 ]
 
 SELECTORS = [
@@ -93,7 +90,7 @@ SELECTORS = [
     },
 ]
 
-# ─── Состояние (сколько постов сегодня) ───────────────────────────────────────
+# ─── Состояние ────────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -104,7 +101,6 @@ def load_state() -> dict:
     except Exception:
         return {"date": "", "count": 0}
 
-
 def save_state(state: dict) -> None:
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -112,34 +108,21 @@ def save_state(state: dict) -> None:
     except IOError as e:
         log.error(f"Не удалось сохранить state.json: {e}")
 
-
 def should_post_now() -> bool:
-    """
-    Проверяет: нужно ли постить сейчас.
-    Логика: каждый час скрипт запускается, но постит только 2 раза в день
-    в случайные часы (выбираются в начале дня и сохраняются в state.json).
-    """
     today = datetime.utcnow().strftime("%Y-%m-%d")
     current_hour = datetime.utcnow().hour
     state = load_state()
 
-    # Новый день — выбираем 2 случайных часа для постинга
     if state.get("date") != today:
-        hours = random.sample(range(8, 22), POSTS_PER_DAY)  # между 8 и 22 UTC
-        state = {
-            "date": today,
-            "count": 0,
-            "hours": sorted(hours),
-        }
+        hours = random.sample(range(8, 22), POSTS_PER_DAY)
+        state = {"date": today, "count": 0, "hours": sorted(hours)}
         save_state(state)
         log.info(f"Новый день. Часы для постов: {state['hours']} UTC")
 
-    # Уже опубликовали 2 поста сегодня
     if state.get("count", 0) >= POSTS_PER_DAY:
         log.info(f"Сегодня уже опубликовано {POSTS_PER_DAY} поста. Пропускаем.")
         return False
 
-    # Текущий час совпадает с одним из запланированных
     planned_hours = state.get("hours", [])
     if current_hour in planned_hours:
         log.info(f"Час {current_hour} UTC — время постить!")
@@ -147,7 +130,6 @@ def should_post_now() -> bool:
 
     log.info(f"Час {current_hour} UTC — не время. Запланировано: {planned_hours} UTC")
     return False
-
 
 def increment_post_count() -> None:
     state = load_state()
@@ -167,14 +149,12 @@ def load_posted() -> set:
         log.warning(f"Не удалось прочитать {POSTED_FILE}: {e}")
         return set()
 
-
 def save_posted(posted: set) -> None:
     try:
         with open(POSTED_FILE, "w", encoding="utf-8") as f:
             json.dump(list(posted), f, ensure_ascii=False, indent=2)
     except IOError as e:
         log.error(f"Не удалось сохранить {POSTED_FILE}: {e}")
-
 
 def get_soup(url: str):
     try:
@@ -185,10 +165,8 @@ def get_soup(url: str):
         log.error(f"Ошибка при запросе {url}: {e}")
         return None
 
-
 def safe_text(el) -> str:
     return el.get_text(strip=True) if el else ""
-
 
 def safe_attr(el, attr: str, base_url: str = "") -> str:
     if not el:
@@ -198,8 +176,7 @@ def safe_attr(el, attr: str, base_url: str = "") -> str:
         return base_url.rstrip("/") + val
     return val or ""
 
-
-# ─── Универсальный парсер страницы ───────────────────────────────────────────
+# ─── Парсер ───────────────────────────────────────────────────────────────────
 
 def parse_page(url: str, base: str) -> list:
     soup = get_soup(url)
@@ -214,12 +191,15 @@ def parse_page(url: str, base: str) -> list:
         products = []
         for card in cards[:30]:
             try:
-                name    = safe_text(card.select_one(sel["name"]))
-                img_el  = card.select_one(sel["img"])
-                img     = safe_attr(img_el, "data-src", base) or safe_attr(img_el, "src", base)
-                href    = safe_attr(card.select_one(sel["link"]), "href", base)
+                name   = safe_text(card.select_one(sel["name"]))
+                img_el = card.select_one(sel["img"])
+                img    = safe_attr(img_el, "data-src", base) or safe_attr(img_el, "src", base)
+                href   = safe_attr(card.select_one(sel["link"]), "href", base)
 
                 if not name or not href or len(name) < 5:
+                    continue
+                # Пропускаем навигационные ссылки
+                if href in [base, base + "/", "https://nout.uz/", "https://pcmarket.uz/", "https://notebookoff.uz/"]:
                     continue
 
                 products.append({"name": name, "img": img, "url": href})
@@ -233,11 +213,8 @@ def parse_page(url: str, base: str) -> list:
     log.info(f"  ✗ {url} → товаров не найдено")
     return []
 
-
 def parse_all() -> list:
-    """Парсит все сайты и возвращает общий список уникальных товаров."""
     all_products = []
-
     sources = [
         ("https://nout.uz",        NOUT_PAGES,        "nout.uz"),
         ("https://pcmarket.uz",    PCMARKET_PAGES,    "pcmarket.uz"),
@@ -255,12 +232,10 @@ def parse_all() -> list:
                         seen_urls.add(item["url"])
                         all_products.append(item)
             except Exception as e:
-                log.error(f"Ошибка парсера {label} на {page_url}: {e}")
-
+                log.error(f"Ошибка {label} на {page_url}: {e}")
         log.info(f"{label}: итого {len(seen_urls)} уникальных товаров")
 
     return all_products
-
 
 # ─── Telegram ────────────────────────────────────────────────────────────────
 
@@ -272,7 +247,6 @@ def format_caption(product: dict) -> str:
         f"💬 @Dmitriy_WhiteFactory"
     )
 
-
 def is_valid_image_url(url: str) -> bool:
     if not url:
         return False
@@ -280,7 +254,6 @@ def is_valid_image_url(url: str) -> bool:
     return lower.startswith("http") and any(
         ext in lower for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]
     )
-
 
 async def post_product(bot: Bot, product: dict) -> bool:
     caption = format_caption(product)
@@ -300,7 +273,6 @@ async def post_product(bot: Bot, product: dict) -> bool:
             log.error(f"Повторная ошибка: {e2}")
         return False
 
-
 # ─── Главная функция ─────────────────────────────────────────────────────────
 
 async def main():
@@ -309,25 +281,22 @@ async def main():
         return
 
     # Проверяем — время ли постить
-    #if not should_post_now():
-    #  return
+    # if not should_post_now():
+    #     return
 
     bot = Bot(token=TELEGRAM_TOKEN)
     posted = load_posted()
 
-    # Собираем все товары
     all_products = parse_all()
     log.info(f"Всего товаров: {len(all_products)}, уже опубликовано: {len(posted)}")
 
-    # Фильтруем новые
     new_products = [p for p in all_products if p.get("url") and p["url"] not in posted]
-    log.info(f"Новых товаров для публикации: {len(new_products)}")
+    log.info(f"Новых товаров: {len(new_products)}")
 
     if not new_products:
         log.info("Нет новых товаров.")
         return
 
-    # Выбираем 1 случайный товар и публикуем
     product = random.choice(new_products)
     log.info(f"Публикуем: {product['name'][:60]}")
 
@@ -337,7 +306,6 @@ async def main():
         save_posted(posted)
         increment_post_count()
         log.info("─── Пост опубликован успешно ───")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
