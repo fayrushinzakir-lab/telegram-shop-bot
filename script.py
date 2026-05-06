@@ -2,6 +2,8 @@
 Telegram Bot: Парсер товаров с узбекских магазинов
 - 2 поста в день в случайное время
 - Без цены и ссылки на источник
+- Время по Ташкенту
+- Локация магазина прикрепляется к посту (если заданы координаты)
 """
 
 import os
@@ -11,6 +13,7 @@ import requests
 import asyncio
 import random
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
@@ -25,16 +28,23 @@ STATE_FILE          = "state.json"
 REQUEST_TIMEOUT     = 15
 POSTS_PER_DAY       = 2
 
-# Окно постинга в UTC. Узбекистан = UTC+5, значит 4–17 UTC = 9:00–22:00 по Ташкенту
-POST_HOUR_START     = 4
-POST_HOUR_END       = 17
+# Время по Ташкенту
+TIMEZONE            = ZoneInfo("Asia/Tashkent")
+POST_HOUR_START     = 9       # 9:00 утра
+POST_HOUR_END       = 22      # 22:00 вечера
+
+# Локация магазина — заполнить координатами с Google Maps
+STORE_NAME          = "White Factory"
+STORE_ADDRESS       = "Малика, здание Меркато"
+STORE_LATITUDE      = None    # например, 41.311081
+STORE_LONGITUDE     = None    # например, 69.240562
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
 }
 
-# ─── Реальные URL категорий ──────────────────────────────────────────────────
+# ─── URL категорий ───────────────────────────────────────────────────────────
 
 NOUT_PAGES = [
     "https://nout.uz",
@@ -94,7 +104,7 @@ SELECTORS = [
     },
 ]
 
-# ─── Состояние ────────────────────────────────────────────────────────────────
+# ─── Состояние ───────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -102,7 +112,6 @@ def load_state() -> dict:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # совместимость со старым форматом
             data.setdefault("posted_hours", [])
             data.setdefault("hours", [])
             data.setdefault("count", 0)
@@ -118,23 +127,17 @@ def save_state(state: dict) -> None:
     except IOError as e:
         log.error(f"Не удалось сохранить state.json: {e}")
 
-def should_post_now() -> tuple[bool, int]:
-    """
-    Возвращает (можно_ли_постить, час_слота_который_закрываем).
-    Логика:
-    - Новый день → генерируем 2 случайных часа в окне POST_HOUR_START..POST_HOUR_END
-    - Постим, если есть запланированный час <= текущий час, ещё не отмеченный как сделанный
-    - Так мы не пропускаем слот, даже если cron опоздал
-    """
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    current_hour = datetime.utcnow().hour
+def should_post_now():
+    now = datetime.now(TIMEZONE)
+    today = now.strftime("%Y-%m-%d")
+    current_hour = now.hour
     state = load_state()
 
     if state.get("date") != today:
         hours = sorted(random.sample(range(POST_HOUR_START, POST_HOUR_END + 1), POSTS_PER_DAY))
         state = {"date": today, "count": 0, "hours": hours, "posted_hours": []}
         save_state(state)
-        log.info(f"Новый день {today}. Часы для постов: {hours} UTC")
+        log.info(f"Новый день {today}. Часы для постов: {hours} (Ташкент)")
 
     planned = state.get("hours", [])
     posted_hours = state.get("posted_hours", [])
@@ -143,15 +146,14 @@ def should_post_now() -> tuple[bool, int]:
         log.info(f"Сегодня уже опубликовано {POSTS_PER_DAY}. Пропускаем.")
         return False, -1
 
-    # Просроченные слоты: час <= текущего и ещё не закрыт
     due = [h for h in planned if h <= current_hour and h not in posted_hours]
 
     if due:
         slot = min(due)
-        log.info(f"Час {current_hour} UTC. Закрываем слот {slot} UTC. Запланировано: {planned}, сделано: {posted_hours}")
+        log.info(f"Час {current_hour} (Ташкент). Закрываем слот {slot}. План: {planned}, сделано: {posted_hours}")
         return True, slot
 
-    log.info(f"Час {current_hour} UTC. Рано. Запланировано: {planned}, сделано: {posted_hours}")
+    log.info(f"Час {current_hour} (Ташкент). Рано. План: {planned}, сделано: {posted_hours}")
     return False, -1
 
 def mark_slot_posted(slot_hour: int) -> None:
@@ -163,7 +165,7 @@ def mark_slot_posted(slot_hour: int) -> None:
     state["posted_hours"] = sorted(posted_hours)
     save_state(state)
 
-# ─── Утилиты ──────────────────────────────────────────────────────────────────
+# ─── Утилиты ─────────────────────────────────────────────────────────────────
 
 def load_posted() -> set:
     if not os.path.exists(POSTED_FILE):
@@ -203,7 +205,7 @@ def safe_attr(el, attr: str, base_url: str = "") -> str:
         return base_url.rstrip("/") + val
     return val or ""
 
-# ─── Парсер ───────────────────────────────────────────────────────────────────
+# ─── Парсер ──────────────────────────────────────────────────────────────────
 
 def parse_page(url: str, base: str) -> list:
     soup = get_soup(url)
@@ -269,8 +271,8 @@ def format_caption(product: dict) -> str:
     return (
         f"💻 <b>{product['name']}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏪 <b>White Factory</b>\n"
-        f"📍 Малика, здание Меркато\n\n"
+        f"🏪 <b>{STORE_NAME}</b>\n"
+        f"📍 {STORE_ADDRESS}\n\n"
         f"👨‍💼 Дмитрий: +998909161817\n"
         f"👨‍💼 Данил: +998909018519"
     )
@@ -290,6 +292,7 @@ async def post_product(bot: Bot, product: dict) -> bool:
         [InlineKeyboardButton("💬 Написать нам", url="https://t.me/Dmitriy_WhiteFactory")]
     ])
     try:
+        # 1. Фото товара с описанием
         if is_valid_image_url(img_url):
             await bot.send_photo(
                 chat_id=CHANNEL_ID,
@@ -305,6 +308,21 @@ async def post_product(bot: Bot, product: dict) -> bool:
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
+
+        # 2. Карта с локацией магазина (если координаты заданы)
+        if STORE_LATITUDE is not None and STORE_LONGITUDE is not None:
+            try:
+                await bot.send_venue(
+                    chat_id=CHANNEL_ID,
+                    latitude=STORE_LATITUDE,
+                    longitude=STORE_LONGITUDE,
+                    title=STORE_NAME,
+                    address=STORE_ADDRESS,
+                )
+                log.info("Локация магазина прикреплена")
+            except TelegramError as ve:
+                log.warning(f"Не удалось отправить локацию: {ve}")
+
         return True
     except TelegramError as e:
         log.error(f"Telegram ошибка '{product['name']}': {e}")
@@ -341,7 +359,7 @@ async def main():
     log.info(f"Новых товаров: {len(new_products)}")
 
     if not new_products:
-        log.warning("Нет новых товаров. Не отмечаем слот, попробуем в следующий раз.")
+        log.warning("Нет новых товаров. Слот не закрываем.")
         return
 
     product = random.choice(new_products)
@@ -352,9 +370,9 @@ async def main():
         posted.add(product["url"])
         save_posted(posted)
         mark_slot_posted(slot)
-        log.info(f"─── Пост опубликован, слот {slot} UTC закрыт ───")
+        log.info(f"─── Пост опубликован, слот {slot} (Ташкент) закрыт ───")
     else:
-        log.error("Не удалось опубликовать. Слот остаётся открытым для повтора.")
+        log.error("Не удалось опубликовать. Слот остаётся открытым.")
 
 if __name__ == "__main__":
     asyncio.run(main())
