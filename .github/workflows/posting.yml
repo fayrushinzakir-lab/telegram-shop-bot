@@ -2,9 +2,11 @@ name: Telegram Product Poster
 
 on:
   schedule:
+    # Каждые 30 минут — чтобы не проспать слот, если GitHub опаздывает
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
+# Не запускать параллельно — иначе будут конфликты при git push
 concurrency:
   group: telegram-poster
   cancel-in-progress: false
@@ -20,6 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # fetch-depth: 0 не нужен, нам хватает последнего коммита
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -42,8 +45,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add posted.json state.json
+          # Коммит только если есть изменения
           if ! git diff --staged --quiet; then
             git commit -m "chore: update state [skip ci]"
+            # Пуллим перед пушем на случай конкурентного коммита
             git pull --rebase origin main || true
             git push
           else
