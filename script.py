@@ -34,7 +34,7 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
 }
 
-# ─── URL категорий ───────────────────────────────────────────────────────────
+# ─── Реальные URL категорий ──────────────────────────────────────────────────
 
 NOUT_PAGES = [
     "https://nout.uz",
@@ -94,7 +94,7 @@ SELECTORS = [
     },
 ]
 
-# ─── Состояние ───────────────────────────────────────────────────────────────
+# ─── Состояние ────────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -102,6 +102,7 @@ def load_state() -> dict:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+            # совместимость со старым форматом
             data.setdefault("posted_hours", [])
             data.setdefault("hours", [])
             data.setdefault("count", 0)
@@ -117,7 +118,14 @@ def save_state(state: dict) -> None:
     except IOError as e:
         log.error(f"Не удалось сохранить state.json: {e}")
 
-def should_post_now():
+def should_post_now() -> tuple[bool, int]:
+    """
+    Возвращает (можно_ли_постить, час_слота_который_закрываем).
+    Логика:
+    - Новый день → генерируем 2 случайных часа в окне POST_HOUR_START..POST_HOUR_END
+    - Постим, если есть запланированный час <= текущий час, ещё не отмеченный как сделанный
+    - Так мы не пропускаем слот, даже если cron опоздал
+    """
     today = datetime.utcnow().strftime("%Y-%m-%d")
     current_hour = datetime.utcnow().hour
     state = load_state()
@@ -135,14 +143,15 @@ def should_post_now():
         log.info(f"Сегодня уже опубликовано {POSTS_PER_DAY}. Пропускаем.")
         return False, -1
 
+    # Просроченные слоты: час <= текущего и ещё не закрыт
     due = [h for h in planned if h <= current_hour and h not in posted_hours]
 
     if due:
         slot = min(due)
-        log.info(f"Час {current_hour} UTC. Закрываем слот {slot}. План: {planned}, сделано: {posted_hours}")
+        log.info(f"Час {current_hour} UTC. Закрываем слот {slot} UTC. Запланировано: {planned}, сделано: {posted_hours}")
         return True, slot
 
-    log.info(f"Час {current_hour} UTC. Рано. План: {planned}, сделано: {posted_hours}")
+    log.info(f"Час {current_hour} UTC. Рано. Запланировано: {planned}, сделано: {posted_hours}")
     return False, -1
 
 def mark_slot_posted(slot_hour: int) -> None:
@@ -154,7 +163,7 @@ def mark_slot_posted(slot_hour: int) -> None:
     state["posted_hours"] = sorted(posted_hours)
     save_state(state)
 
-# ─── Утилиты ─────────────────────────────────────────────────────────────────
+# ─── Утилиты ──────────────────────────────────────────────────────────────────
 
 def load_posted() -> set:
     if not os.path.exists(POSTED_FILE):
@@ -194,7 +203,7 @@ def safe_attr(el, attr: str, base_url: str = "") -> str:
         return base_url.rstrip("/") + val
     return val or ""
 
-# ─── Парсер ──────────────────────────────────────────────────────────────────
+# ─── Парсер ───────────────────────────────────────────────────────────────────
 
 def parse_page(url: str, base: str) -> list:
     soup = get_soup(url)
@@ -332,7 +341,7 @@ async def main():
     log.info(f"Новых товаров: {len(new_products)}")
 
     if not new_products:
-        log.warning("Нет новых товаров. Слот не закрываем.")
+        log.warning("Нет новых товаров. Не отмечаем слот, попробуем в следующий раз.")
         return
 
     product = random.choice(new_products)
@@ -345,7 +354,7 @@ async def main():
         mark_slot_posted(slot)
         log.info(f"─── Пост опубликован, слот {slot} UTC закрыт ───")
     else:
-        log.error("Не удалось опубликовать. Слот остаётся открытым.")
+        log.error("Не удалось опубликовать. Слот остаётся открытым для повтора.")
 
 if __name__ == "__main__":
     asyncio.run(main())
