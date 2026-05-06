@@ -25,12 +25,16 @@ STATE_FILE          = "state.json"
 REQUEST_TIMEOUT     = 15
 POSTS_PER_DAY       = 2
 
+# Окно постинга в UTC. Узбекистан = UTC+5, значит 4–17 UTC = 9:00–22:00 по Ташкенту
+POST_HOUR_START     = 4
+POST_HOUR_END       = 17
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
 }
 
-# ─── Реальные URL категорий (проверены) ──────────────────────────────────────
+# ─── URL категорий ───────────────────────────────────────────────────────────
 
 NOUT_PAGES = [
     "https://nout.uz",
@@ -90,16 +94,21 @@ SELECTORS = [
     },
 ]
 
-# ─── Состояние ────────────────────────────────────────────────────────────────
+# ─── Состояние ───────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
-        return {"date": "", "count": 0}
+        return {"date": "", "count": 0, "hours": [], "posted_hours": []}
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            data.setdefault("posted_hours", [])
+            data.setdefault("hours", [])
+            data.setdefault("count", 0)
+            data.setdefault("date", "")
+            return data
     except Exception:
-        return {"date": "", "count": 0}
+        return {"date": "", "count": 0, "hours": [], "posted_hours": []}
 
 def save_state(state: dict) -> None:
     try:
@@ -108,35 +117,44 @@ def save_state(state: dict) -> None:
     except IOError as e:
         log.error(f"Не удалось сохранить state.json: {e}")
 
-def should_post_now() -> bool:
+def should_post_now():
     today = datetime.utcnow().strftime("%Y-%m-%d")
     current_hour = datetime.utcnow().hour
     state = load_state()
 
     if state.get("date") != today:
-        hours = random.sample(range(8, 22), POSTS_PER_DAY)
-        state = {"date": today, "count": 0, "hours": sorted(hours)}
+        hours = sorted(random.sample(range(POST_HOUR_START, POST_HOUR_END + 1), POSTS_PER_DAY))
+        state = {"date": today, "count": 0, "hours": hours, "posted_hours": []}
         save_state(state)
-        log.info(f"Новый день. Часы для постов: {state['hours']} UTC")
+        log.info(f"Новый день {today}. Часы для постов: {hours} UTC")
+
+    planned = state.get("hours", [])
+    posted_hours = state.get("posted_hours", [])
 
     if state.get("count", 0) >= POSTS_PER_DAY:
-        log.info(f"Сегодня уже опубликовано {POSTS_PER_DAY} поста. Пропускаем.")
-        return False
+        log.info(f"Сегодня уже опубликовано {POSTS_PER_DAY}. Пропускаем.")
+        return False, -1
 
-    planned_hours = state.get("hours", [])
-    if current_hour in planned_hours:
-        log.info(f"Час {current_hour} UTC — время постить!")
-        return True
+    due = [h for h in planned if h <= current_hour and h not in posted_hours]
 
-    log.info(f"Час {current_hour} UTC — не время. Запланировано: {planned_hours} UTC")
-    return False
+    if due:
+        slot = min(due)
+        log.info(f"Час {current_hour} UTC. Закрываем слот {slot}. План: {planned}, сделано: {posted_hours}")
+        return True, slot
 
-def increment_post_count() -> None:
+    log.info(f"Час {current_hour} UTC. Рано. План: {planned}, сделано: {posted_hours}")
+    return False, -1
+
+def mark_slot_posted(slot_hour: int) -> None:
     state = load_state()
     state["count"] = state.get("count", 0) + 1
+    posted_hours = state.get("posted_hours", [])
+    if slot_hour not in posted_hours:
+        posted_hours.append(slot_hour)
+    state["posted_hours"] = sorted(posted_hours)
     save_state(state)
 
-# ─── Утилиты ──────────────────────────────────────────────────────────────────
+# ─── Утилиты ─────────────────────────────────────────────────────────────────
 
 def load_posted() -> set:
     if not os.path.exists(POSTED_FILE):
@@ -176,7 +194,7 @@ def safe_attr(el, attr: str, base_url: str = "") -> str:
         return base_url.rstrip("/") + val
     return val or ""
 
-# ─── Парсер ───────────────────────────────────────────────────────────────────
+# ─── Парсер ──────────────────────────────────────────────────────────────────
 
 def parse_page(url: str, base: str) -> list:
     soup = get_soup(url)
@@ -198,7 +216,6 @@ def parse_page(url: str, base: str) -> list:
 
                 if not name or not href or len(name) < 5:
                     continue
-                # Пропускаем навигационные ссылки
                 if href in [base, base + "/", "https://nout.uz/", "https://pcmarket.uz/", "https://notebookoff.uz/"]:
                     continue
 
@@ -301,9 +318,9 @@ async def main():
         log.error("Не заданы TELEGRAM_TOKEN или CHANNEL_ID!")
         return
 
-    # Проверяем — время ли постить
-    if not should_post_now():
-       return
+    can_post, slot = should_post_now()
+    if not can_post:
+        return
 
     bot = Bot(token=TELEGRAM_TOKEN)
     posted = load_posted()
@@ -315,7 +332,7 @@ async def main():
     log.info(f"Новых товаров: {len(new_products)}")
 
     if not new_products:
-        log.info("Нет новых товаров.")
+        log.warning("Нет новых товаров. Слот не закрываем.")
         return
 
     product = random.choice(new_products)
@@ -325,8 +342,10 @@ async def main():
     if success:
         posted.add(product["url"])
         save_posted(posted)
-        increment_post_count()
-        log.info("─── Пост опубликован успешно ───")
+        mark_slot_posted(slot)
+        log.info(f"─── Пост опубликован, слот {slot} UTC закрыт ───")
+    else:
+        log.error("Не удалось опубликовать. Слот остаётся открытым.")
 
 if __name__ == "__main__":
     asyncio.run(main())
