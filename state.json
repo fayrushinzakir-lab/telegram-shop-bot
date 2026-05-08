@@ -1,12 +1,9 @@
 {
-  "date": "2026-05-08",
-  "count": 2,
+  "date": "2026-05-09",
+  "count": 0,
   "hours": [
-    12,
-    18
+    20,
+    21
   ],
-  "posted_hours": [
-    12,
-    18
-  ]
+  "posted_hours": []
 }
