@@ -1,1 +1,11 @@
-{"date": "", "count": 0, "hours": [], "posted_hours": []}
+{
+  "date": "2026-05-09",
+  "count": 1,
+  "hours": [
+    10,
+    16
+  ],
+  "posted_hours": [
+    10
+  ]
+}
