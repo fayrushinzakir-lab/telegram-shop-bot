@@ -31,11 +31,11 @@ POSTS_PER_DAY       = 2
 # Время по Ташкенту
 TIMEZONE            = ZoneInfo("Asia/Tashkent")
 POST_HOUR_START     = 9       # 9:00 утра
-POST_HOUR_END       = 22      # 22:00 вечера
+POST_HOUR_END       = 17      # 17:00 вечера
 
 # Локация магазина — заполнить координатами с Google Maps
 STORE_NAME          = "White Factory"
-STORE_ADDRESS       = "Малика, здание Меркато"
+STORE_ADDRESS       = "Малика, ориентир здание Меркато"
 STORE_LATITUDE      = None    # например, 41.311081
 STORE_LONGITUDE     = None    # например, 69.240562
 
