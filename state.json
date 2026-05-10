@@ -1,11 +1,12 @@
 {
   "date": "2026-05-10",
-  "count": 1,
+  "count": 2,
   "hours": [
     9,
     14
   ],
   "posted_hours": [
-    9
+    9,
+    14
   ]
 }
