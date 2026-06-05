@@ -6,7 +6,25 @@ name: Telegram Product Poster
 on:
   schedule:
     - cron: "0 4-13 * * *"
-  workflow_dispatch: {}   # ручной запуск кнопкой в интерфейсе Actions
+  workflow_dispatch:
+    inputs:
+      test_holiday:
+        description: "Тест поздравления (none = обычный запуск)"
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - new_year
+          - defenders
+          - march8
+          - navruz
+          - memory_day
+          - independence
+          - teachers_day
+          - constitution
+          - ramazan
+          - kurban
 
 permissions:
   contents: write          # чтобы коммитить posted.json / state.json / holidays.json
@@ -43,6 +61,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}   # необязательно
+          TEST_CHAT_ID: ${{ secrets.TEST_CHAT_ID }}     # необязательно: куда слать тест
+          FORCE_HOLIDAY: ${{ github.event.inputs.test_holiday }}
         run: python script.py
 
       - name: Commit state files
