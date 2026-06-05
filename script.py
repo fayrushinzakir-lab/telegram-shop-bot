@@ -33,11 +33,12 @@ TIMEZONE            = ZoneInfo("Asia/Tashkent")
 POST_HOUR_START     = 9       # 9:00 утра
 POST_HOUR_END       = 17      # 17:00 вечера
 
-# Локация магазина — заполнить координатами с Google Maps
+# Локация магазина — координаты с Google Maps.
+# Чтобы выключить отправку локации, поставьте обратно None у обеих переменных.
 STORE_NAME          = "White Factory"
 STORE_ADDRESS       = "Малика, ориентир здание Меркато"
-STORE_LATITUDE      = None   # 41.337737
-STORE_LONGITUDE     = None   # 69.273143
+STORE_LATITUDE      = 41.337737
+STORE_LONGITUDE     = 69.273143
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -273,7 +274,6 @@ def format_caption(product: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🏪 <b>{STORE_NAME}</b>\n"
         f"📍 {STORE_ADDRESS}\n\n"
-        
         f"👨‍💼 Дмитрий: +998909161817\n"
         f"👨‍💼 Даниил: +998909018519"
     )
@@ -292,52 +292,56 @@ async def post_product(bot: Bot, product: dict) -> bool:
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Написать нам", url="https://t.me/Dmitriy_WhiteFactory")]
     ])
+
+    sent = False
+
+    # 1. Фото товара с описанием (с откатом на текст, если фото не загрузилось)
     try:
-        # 1. Фото товара с описанием
         if is_valid_image_url(img_url):
             await bot.send_photo(
                 chat_id=CHANNEL_ID,
                 photo=img_url,
                 caption=caption,
                 parse_mode="HTML",
-                reply_markup=keyboard
+                reply_markup=keyboard,
             )
         else:
             await bot.send_message(
                 chat_id=CHANNEL_ID,
                 text=caption,
                 parse_mode="HTML",
-                reply_markup=keyboard
+                reply_markup=keyboard,
             )
-
-        # 2. Карта с локацией магазина (если координаты заданы)
-        if STORE_LATITUDE is not None and STORE_LONGITUDE is not None:
-            try:
-                await bot.send_venue(
-                    chat_id=CHANNEL_ID,
-                    latitude=STORE_LATITUDE,
-                    longitude=STORE_LONGITUDE,
-                    title=STORE_NAME,
-                    address=STORE_ADDRESS,
-                )
-                log.info("Локация магазина прикреплена")
-            except TelegramError as ve:
-                log.warning(f"Не удалось отправить локацию: {ve}")
-
-        return True
+        sent = True
     except TelegramError as e:
-        log.error(f"Telegram ошибка '{product['name']}': {e}")
+        log.error(f"Telegram ошибка с фото '{product['name']}': {e}")
         try:
             await bot.send_message(
                 chat_id=CHANNEL_ID,
                 text=caption,
                 parse_mode="HTML",
-                reply_markup=keyboard
+                reply_markup=keyboard,
             )
-            return True
+            sent = True
         except TelegramError as e2:
             log.error(f"Повторная ошибка: {e2}")
-        return False
+            return False
+
+    # 2. Карта с локацией магазина (если координаты заданы)
+    if sent and STORE_LATITUDE is not None and STORE_LONGITUDE is not None:
+        try:
+            await bot.send_venue(
+                chat_id=CHANNEL_ID,
+                latitude=STORE_LATITUDE,
+                longitude=STORE_LONGITUDE,
+                title=STORE_NAME,
+                address=STORE_ADDRESS,
+            )
+            log.info("Локация магазина прикреплена")
+        except TelegramError as ve:
+            log.warning(f"Не удалось отправить локацию: {ve}")
+
+    return sent
 
 # ─── Главная функция ─────────────────────────────────────────────────────────
 
