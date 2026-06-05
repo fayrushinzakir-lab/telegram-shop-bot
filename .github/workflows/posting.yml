@@ -1,56 +1,50 @@
 name: Telegram Product Poster
 
+# Запускается каждый час в окне 09:00–18:00 по Ташкенту (UTC+5 → 04–13 UTC).
+# Бот сам решает, в какие 2 случайных часа постить, поэтому частые запуски нужны,
+# чтобы он успел «поймать» запланированные слоты.
 on:
   schedule:
-    # Каждые 30 минут — чтобы не проспать слот, если GitHub опаздывает
-    - cron: "*/30 * * * *"
-  workflow_dispatch:
+    - cron: "0 4-13 * * *"
+  workflow_dispatch: {}   # ручной запуск кнопкой в интерфейсе Actions
 
-# Не запускать параллельно — иначе будут конфликты при git push
+permissions:
+  contents: write          # чтобы коммитить posted.json / state.json
+
 concurrency:
-  group: telegram-poster
+  group: telegram-poster   # не запускать два прогона одновременно (конфликт push)
   cancel-in-progress: false
 
 jobs:
   post-products:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # fetch-depth: 0 не нужен, нам хватает последнего коммита
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install requests beautifulsoup4 "python-telegram-bot>=20"
 
       - name: Run parser and post to Telegram
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}   # необязательно
         run: python script.py
 
       - name: Commit state files
-        if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add posted.json state.json
-          # Коммит только если есть изменения
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: update state [skip ci]"
-            # Пуллим перед пушем на случай конкурентного коммита
-            git pull --rebase origin main || true
-            git push
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add posted.json state.json || true
+          if git diff --cached --quiet; then
+            echo "Состояние не изменилось — коммит не нужен."
           else
-            echo "Нет изменений в state — пропускаем коммит"
+            git commit -m "chore: update state [skip ci]"
+            git push
           fi
