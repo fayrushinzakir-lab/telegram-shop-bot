@@ -273,7 +273,7 @@ def format_caption(product: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🏪 <b>{STORE_NAME}</b>\n"
         f"📍 {STORE_ADDRESS}\n\n"
-        f"www.whitefactory.uz\n"
+        
         f"👨‍💼 Дмитрий: +998909161817\n"
         f"👨‍💼 Даниил: +998909018519"
     )
