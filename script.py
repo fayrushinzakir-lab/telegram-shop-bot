@@ -36,8 +36,8 @@ POST_HOUR_END       = 17      # 17:00 вечера
 # Локация магазина — заполнить координатами с Google Maps
 STORE_NAME          = "White Factory"
 STORE_ADDRESS       = "Малика, ориентир здание Меркато"
-STORE_LATITUDE      = None    41.337737
-STORE_LONGITUDE     = None    69.273143
+STORE_LATITUDE      = None   # 41.337737
+STORE_LONGITUDE     = None   # 69.273143
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
