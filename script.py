@@ -1,18 +1,21 @@
 """
 Telegram Bot: Парсер товаров с узбекских магазинов
-- 2 поста в день в случайное время
+- 2 поста в день в случайное время (по Ташкенту)
 - Без цены и ссылки на источник
-- Время по Ташкенту
+- Картинка скачивается и отправляется файлом (надёжнее, чем по URL)
+- Если новых товаров нет — повторно публикуется давно не выходивший
 - Локация магазина прикрепляется к посту (если заданы координаты)
+- Опциональный алерт администратору, если источник перестал отдавать товары
 """
 
 import os
 import json
+import time
+import random
 import logging
 import requests
 import asyncio
-import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,24 +24,47 @@ from telegram.error import TelegramError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
+
+def _env_float(name: str, default):
+    val = os.environ.get(name, "")
+    if val == "":
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        log.warning(f"Не удалось разобрать {name}={val!r}, использую значение по умолчанию")
+        return default
+
+
 TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN", "")
 CHANNEL_ID          = os.environ.get("CHANNEL_ID", "")
+ADMIN_CHAT_ID       = os.environ.get("ADMIN_CHAT_ID", "")   # необязательно: куда слать алерты
+
 POSTED_FILE         = "posted.json"
 STATE_FILE          = "state.json"
 REQUEST_TIMEOUT     = 15
+REQUEST_RETRIES     = 2          # повторов на неудачный запрос страницы
+REQUEST_DELAY_MIN   = 1.0        # пауза между страницами (вежливость к сайтам)
+REQUEST_DELAY_MAX   = 2.5
 POSTS_PER_DAY       = 2
+POSTED_RETENTION_DAYS = 365      # сколько хранить историю публикаций
 
 # Время по Ташкенту
 TIMEZONE            = ZoneInfo("Asia/Tashkent")
 POST_HOUR_START     = 9       # 9:00 утра
 POST_HOUR_END       = 17      # 17:00 вечера
 
-# Локация магазина — координаты с Google Maps.
-# Чтобы выключить отправку локации, поставьте обратно None у обеих переменных.
-STORE_NAME          = "White Factory"
-STORE_ADDRESS       = "Малика, ориентир здание Меркато"
-STORE_LATITUDE      = 41.337737
-STORE_LONGITUDE     = 69.273143
+# Магазин (можно переопределить через переменные окружения)
+STORE_NAME          = os.environ.get("STORE_NAME", "White Factory")
+STORE_ADDRESS       = os.environ.get("STORE_ADDRESS", "Малика, ориентир здание Меркато")
+# Координаты с Google Maps. Чтобы выключить локацию — оставьте пусто (STORE_LAT="").
+STORE_LATITUDE      = _env_float("STORE_LAT", 41.337737)
+STORE_LONGITUDE     = _env_float("STORE_LON", 69.273143)
+
+# Контакты в подписи и кнопка
+CONTACT_LINE_1      = os.environ.get("CONTACT_1", "👨‍💼 Дмитрий: +998909161817")
+CONTACT_LINE_2      = os.environ.get("CONTACT_2", "👨‍💼 Даниил: +998909018519")
+CONTACT_BUTTON_URL  = os.environ.get("CONTACT_BUTTON_URL", "https://t.me/Dmitriy_WhiteFactory")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -105,7 +131,7 @@ SELECTORS = [
     },
 ]
 
-# ─── Состояние ───────────────────────────────────────────────────────────────
+# ─── Состояние (слоты публикаций на день) ─────────────────────────────────────
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -166,34 +192,62 @@ def mark_slot_posted(slot_hour: int) -> None:
     state["posted_hours"] = sorted(posted_hours)
     save_state(state)
 
-# ─── Утилиты ─────────────────────────────────────────────────────────────────
+# ─── История публикаций (url -> дата последней публикации) ────────────────────
 
-def load_posted() -> set:
+def _parse_ts(ts) -> datetime:
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TIMEZONE)
+        return dt
+    except (ValueError, TypeError):
+        return datetime(1970, 1, 1, tzinfo=TIMEZONE)
+
+def load_posted() -> dict:
+    """Возвращает словарь {url: iso_дата}. Поддерживает старый формат (список url)."""
     if not os.path.exists(POSTED_FILE):
-        return set()
+        return {}
     try:
         with open(POSTED_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return set(data) if isinstance(data, list) else set()
     except (json.JSONDecodeError, IOError) as e:
         log.warning(f"Не удалось прочитать {POSTED_FILE}: {e}")
-        return set()
+        return {}
 
-def save_posted(posted: set) -> None:
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        # миграция со старого формата: считаем, что всё опубликовано давно
+        old = (datetime.now(TIMEZONE) - timedelta(days=1)).isoformat()
+        return {url: old for url in data}
+    return {}
+
+def save_posted(posted: dict) -> None:
+    # чистим записи старше POSTED_RETENTION_DAYS, чтобы файл не рос бесконечно
+    cutoff = datetime.now(TIMEZONE) - timedelta(days=POSTED_RETENTION_DAYS)
+    cleaned = {url: ts for url, ts in posted.items() if _parse_ts(ts) >= cutoff}
     try:
         with open(POSTED_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(posted), f, ensure_ascii=False, indent=2)
+            json.dump(cleaned, f, ensure_ascii=False, indent=2)
     except IOError as e:
         log.error(f"Не удалось сохранить {POSTED_FILE}: {e}")
 
+# ─── Утилиты ─────────────────────────────────────────────────────────────────
+
 def get_soup(url: str):
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return BeautifulSoup(resp.text, "html.parser")
-    except requests.RequestException as e:
-        log.error(f"Ошибка при запросе {url}: {e}")
-        return None
+    last_err = None
+    for attempt in range(REQUEST_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            return BeautifulSoup(resp.text, "html.parser")
+        except requests.RequestException as e:
+            last_err = e
+            if attempt < REQUEST_RETRIES:
+                log.warning(f"Запрос {url} не удался (попытка {attempt + 1}): {e}. Повтор…")
+                time.sleep(1.5 * (attempt + 1))
+    log.error(f"Запрос {url} окончательно не удался: {last_err}")
+    return None
 
 def safe_text(el) -> str:
     return el.get_text(strip=True) if el else ""
@@ -205,6 +259,47 @@ def safe_attr(el, attr: str, base_url: str = "") -> str:
     if val and base_url and str(val).startswith("/"):
         return base_url.rstrip("/") + val
     return val or ""
+
+def normalize_name(name: str) -> str:
+    return " ".join(name.lower().split())
+
+# ─── Скачивание картинки ──────────────────────────────────────────────────────
+
+def _looks_like_image(data: bytes) -> bool:
+    if len(data) < 12:
+        return False
+    if data[:3] == b"\xff\xd8\xff":                       # JPEG
+        return True
+    if data[:8] == b"\x89PNG\r\n\x1a\n":                   # PNG
+        return True
+    if data[:6] in (b"GIF87a", b"GIF89a"):                 # GIF
+        return True
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":      # WEBP
+        return True
+    return False
+
+def fetch_image(url: str):
+    """Скачивает картинку и возвращает байты, либо None если не вышло/не картинка."""
+    if not url or not str(url).lower().startswith("http"):
+        return None
+    if str(url).lower().split("?")[0].endswith(".svg"):
+        return None  # Telegram не показывает SVG как фото
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.content
+    except requests.RequestException as e:
+        log.warning(f"Не удалось скачать картинку {url}: {e}")
+        return None
+
+    # Telegram: фото до 10 МБ; слишком маленькое — вероятно заглушка/иконка
+    if not (2048 <= len(data) <= 10 * 1024 * 1024):
+        log.debug(f"Картинка отброшена по размеру ({len(data)} б): {url}")
+        return None
+    if not _looks_like_image(data):
+        log.debug(f"Не похоже на изображение: {url}")
+        return None
+    return data
 
 # ─── Парсер ──────────────────────────────────────────────────────────────────
 
@@ -242,8 +337,13 @@ def parse_page(url: str, base: str) -> list:
     log.info(f"  ✗ {url} → товаров не найдено")
     return []
 
-def parse_all() -> list:
+def parse_all():
+    """Возвращает (список_товаров, список_источников_без_товаров)."""
     all_products = []
+    seen_urls = set()
+    seen_names = set()
+    failed_sources = []
+
     sources = [
         ("https://nout.uz",        NOUT_PAGES,        "nout.uz"),
         ("https://pcmarket.uz",    PCMARKET_PAGES,    "pcmarket.uz"),
@@ -252,19 +352,41 @@ def parse_all() -> list:
 
     for base, pages, label in sources:
         log.info(f"=== Парсинг {label} ===")
-        seen_urls = set()
+        before = len(all_products)
         for page_url in pages:
             try:
                 items = parse_page(page_url, base)
                 for item in items:
-                    if item["url"] not in seen_urls:
-                        seen_urls.add(item["url"])
-                        all_products.append(item)
+                    nname = normalize_name(item["name"])
+                    if item["url"] in seen_urls or nname in seen_names:
+                        continue  # дубль по ссылке или по названию
+                    seen_urls.add(item["url"])
+                    seen_names.add(nname)
+                    all_products.append(item)
             except Exception as e:
                 log.error(f"Ошибка {label} на {page_url}: {e}")
-        log.info(f"{label}: итого {len(seen_urls)} уникальных товаров")
+            time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
 
-    return all_products
+        added = len(all_products) - before
+        log.info(f"{label}: добавлено {added} уникальных товаров")
+        if added == 0:
+            failed_sources.append(label)
+
+    return all_products, failed_sources
+
+# ─── Выбор товара ─────────────────────────────────────────────────────────────
+
+def pick_product(all_products: list, posted: dict):
+    """Сначала ни разу не публиковавшиеся; если таких нет — самый давний."""
+    if not all_products:
+        return None, ""
+
+    fresh = [p for p in all_products if p["url"] not in posted]
+    if fresh:
+        return random.choice(fresh), "новый"
+
+    oldest = min(all_products, key=lambda p: _parse_ts(posted.get(p["url"])))
+    return oldest, "повтор"
 
 # ─── Telegram ────────────────────────────────────────────────────────────────
 
@@ -274,33 +396,24 @@ def format_caption(product: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🏪 <b>{STORE_NAME}</b>\n"
         f"📍 {STORE_ADDRESS}\n\n"
-        f"👨‍💼 Дмитрий: +998909161817\n"
-        f"👨‍💼 Даниил: +998909018519"
-    )
-
-def is_valid_image_url(url: str) -> bool:
-    if not url:
-        return False
-    lower = url.lower()
-    return lower.startswith("http") and any(
-        ext in lower for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]
+        f"{CONTACT_LINE_1}\n"
+        f"{CONTACT_LINE_2}"
     )
 
 async def post_product(bot: Bot, product: dict) -> bool:
     caption = format_caption(product)
-    img_url = product.get("img", "")
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 Написать нам", url="https://t.me/Dmitriy_WhiteFactory")]
+        [InlineKeyboardButton("💬 Написать нам", url=CONTACT_BUTTON_URL)]
     ])
-
+    image = fetch_image(product.get("img", ""))
     sent = False
 
-    # 1. Фото товара с описанием (с откатом на текст, если фото не загрузилось)
+    # 1. Фото товара с описанием (с откатом на текст, если фото нет/не отправилось)
     try:
-        if is_valid_image_url(img_url):
+        if image:
             await bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=img_url,
+                photo=image,
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=keyboard,
@@ -343,6 +456,14 @@ async def post_product(bot: Bot, product: dict) -> bool:
 
     return sent
 
+async def notify_admin(bot: Bot, text: str) -> None:
+    if not ADMIN_CHAT_ID:
+        return
+    try:
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+    except TelegramError as e:
+        log.warning(f"Не удалось отправить алерт администратору: {e}")
+
 # ─── Главная функция ─────────────────────────────────────────────────────────
 
 async def main():
@@ -354,28 +475,33 @@ async def main():
     if not can_post:
         return
 
-    bot = Bot(token=TELEGRAM_TOKEN)
     posted = load_posted()
 
-    all_products = parse_all()
-    log.info(f"Всего товаров: {len(all_products)}, уже опубликовано: {len(posted)}")
+    all_products, failed_sources = parse_all()
+    log.info(f"Всего товаров: {len(all_products)}, в истории публикаций: {len(posted)}")
 
-    new_products = [p for p in all_products if p.get("url") and p["url"] not in posted]
-    log.info(f"Новых товаров: {len(new_products)}")
+    bot = Bot(token=TELEGRAM_TOKEN)
 
-    if not new_products:
-        log.warning("Нет новых товаров. Слот не закрываем.")
+    # Предупреждаем администратора, если какой-то сайт перестал отдавать товары
+    if failed_sources:
+        msg = ("⚠️ Источники без товаров: " + ", ".join(failed_sources) +
+               "\nВозможно, изменилась вёрстка сайта или сайт недоступен.")
+        log.warning(msg)
+        await notify_admin(bot, msg)
+
+    product, kind = pick_product(all_products, posted)
+    if product is None:
+        log.warning("Парсинг ничего не вернул. Слот не закрываем.")
         return
 
-    product = random.choice(new_products)
-    log.info(f"Публикуем: {product['name'][:60]}")
+    log.info(f"Публикуем ({kind}): {product['name'][:60]}")
 
     success = await post_product(bot, product)
     if success:
-        posted.add(product["url"])
+        posted[product["url"]] = datetime.now(TIMEZONE).isoformat()
         save_posted(posted)
         mark_slot_posted(slot)
-        log.info(f"─── Пост опубликован, слот {slot} (Ташкент) закрыт ───")
+        log.info(f"─── Пост опубликован ({kind}), слот {slot} (Ташкент) закрыт ───")
     else:
         log.error("Не удалось опубликовать. Слот остаётся открытым.")
 
