@@ -1,8 +1,8 @@
 name: Telegram Product Poster
 
 # Запускается каждый час в окне 09:00–18:00 по Ташкенту (UTC+5 → 04–13 UTC).
-# Бот сам решает, в какие 2 случайных часа постить, поэтому частые запуски нужны,
-# чтобы он успел «поймать» запланированные слоты.
+# Бот сам выбирает 2 случайных часа для постов, поэтому частые запуски нужны,
+# чтобы он успевал «поймать» запланированные слоты.
 on:
   schedule:
     - cron: "0 4-13 * * *"
@@ -11,8 +11,10 @@ on:
 permissions:
   contents: write          # чтобы коммитить posted.json / state.json
 
+# Не запускать два прогона одновременно — иначе они конфликтуют при push.
+# cancel-in-progress: false → второй запуск встаёт в очередь и стартует после первого.
 concurrency:
-  group: telegram-poster   # не запускать два прогона одновременно (конфликт push)
+  group: telegram-poster
   cancel-in-progress: false
 
 jobs:
@@ -21,6 +23,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -41,10 +45,26 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add posted.json state.json || true
           if git diff --cached --quiet; then
-            echo "Состояние не изменилось — коммит не нужен."
-          else
-            git commit -m "chore: update state [skip ci]"
-            git push
+            echo "Состояние не изменилось — коммитить нечего."
+            exit 0
           fi
+          git commit -m "chore: update state [skip ci]"
+
+          # Пушим с повторами. Если кто-то успел запушить в main раньше нас —
+          # подтягиваем его изменения, но в файлах состояния оставляем НАШУ
+          # свежую версию (-X ours), затем повторяем push.
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "Состояние сохранено."
+              exit 0
+            fi
+            echo "Push отклонён (попытка $attempt) — синхронизируюсь с origin/main…"
+            git fetch origin main || true
+            git merge -X ours --no-edit FETCH_HEAD || git merge --abort || true
+          done
+
+          echo "Не удалось сохранить состояние после нескольких попыток."
+          exit 1
