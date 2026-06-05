@@ -1,18 +1,17 @@
 name: Telegram Product Poster
 
 # Запускается каждый час в окне 09:00–18:00 по Ташкенту (UTC+5 → 04–13 UTC).
-# Бот сам выбирает 2 случайных часа для постов, поэтому частые запуски нужны,
-# чтобы он успевал «поймать» запланированные слоты.
+# Бот сам выбирает 2 случайных часа для товарных постов, а поздравления
+# публикует один раз в день праздника (с 09:00), поэтому частые запуски нужны.
 on:
   schedule:
     - cron: "0 4-13 * * *"
   workflow_dispatch: {}   # ручной запуск кнопкой в интерфейсе Actions
 
 permissions:
-  contents: write          # чтобы коммитить posted.json / state.json
+  contents: write          # чтобы коммитить posted.json / state.json / holidays.json
 
-# Не запускать два прогона одновременно — иначе они конфликтуют при push.
-# cancel-in-progress: false → второй запуск встаёт в очередь и стартует после первого.
+# Не запускать два прогона одновременно — иначе конфликт при push.
 concurrency:
   group: telegram-poster
   cancel-in-progress: false
@@ -31,8 +30,13 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Шрифт с кириллицей для праздничных открыток. Не критично: если не
+      # поставится, поздравление просто выйдет текстом.
+      - name: Install fonts for greeting cards
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-dejavu-core || true
+
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 "python-telegram-bot>=20"
+        run: pip install requests beautifulsoup4 pillow "python-telegram-bot>=20"
 
       - name: Run parser and post to Telegram
         env:
@@ -46,16 +50,15 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add posted.json state.json || true
+          git add posted.json state.json holidays.json || true
           if git diff --cached --quiet; then
             echo "Состояние не изменилось — коммитить нечего."
             exit 0
           fi
           git commit -m "chore: update state [skip ci]"
 
-          # Пушим с повторами. Если кто-то успел запушить в main раньше нас —
-          # подтягиваем его изменения, но в файлах состояния оставляем НАШУ
-          # свежую версию (-X ours), затем повторяем push.
+          # Пушим с повторами. Если кто-то успел запушить в main раньше —
+          # подтягиваем его изменения, в файлах состояния оставляем нашу версию.
           for attempt in 1 2 3 4 5; do
             if git push origin HEAD:main; then
               echo "Состояние сохранено."
