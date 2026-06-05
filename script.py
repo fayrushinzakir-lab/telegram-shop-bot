@@ -500,12 +500,16 @@ def _logo_white(Image):
     """Логотип (белый знак на чёрном) → RGBA: белый знак на прозрачном фоне.
     Прозрачность берётся из яркости, чёрный фон уходит сам. None — если файла нет."""
     if not LOGO_PATH or not os.path.exists(LOGO_PATH):
+        log.warning(f"Логотип не найден по пути {LOGO_PATH!r} (рабочая папка: {os.getcwd()}) "
+                    f"— открытка будет без лого.")
         return None
     try:
         mask = Image.open(LOGO_PATH).convert("L")          # яркость = маска
         white = Image.new("RGBA", mask.size, (255, 255, 255, 255))
         clear = Image.new("RGBA", mask.size, (255, 255, 255, 0))
-        return Image.composite(white, clear, mask)          # alpha = яркость
+        logo = Image.composite(white, clear, mask)          # alpha = яркость
+        log.info(f"Логотип загружен: {LOGO_PATH} ({mask.size[0]}x{mask.size[1]})")
+        return logo
     except Exception as e:
         log.warning(f"Не удалось загрузить логотип {LOGO_PATH}: {e}")
         return None
