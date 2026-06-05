@@ -1,11 +1,11 @@
 """
-Telegram Bot: Парсер товаров с узбекских магазинов
-- 2 поста в день в случайное время (по Ташкенту)
-- Без цены и ссылки на источник
-- Картинка скачивается и отправляется файлом (надёжнее, чем по URL)
+Telegram Bot: Парсер товаров + праздничные поздравления
+- 2 поста с товарами в день в случайное время (по Ташкенту)
+- Картинка товара скачивается и отправляется файлом
 - Если новых товаров нет — повторно публикуется давно не выходивший
-- Локация магазина прикрепляется к посту (если заданы координаты)
-- Опциональный алерт администратору, если источник перестал отдавать товары
+- В каждый праздник Узбекистана — поздравление от компании со своим
+  текстом и своей открыткой (картинкой)
+- Локация магазина прикрепляется к товарным постам (если заданы координаты)
 """
 
 import os
@@ -15,6 +15,7 @@ import random
 import logging
 import requests
 import asyncio
+from io import BytesIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
@@ -42,12 +43,14 @@ ADMIN_CHAT_ID       = os.environ.get("ADMIN_CHAT_ID", "")   # необязате
 
 POSTED_FILE         = "posted.json"
 STATE_FILE          = "state.json"
+HOLIDAYS_FILE       = "holidays.json"     # какие праздники уже поздравлены
 REQUEST_TIMEOUT     = 15
 REQUEST_RETRIES     = 2          # повторов на неудачный запрос страницы
 REQUEST_DELAY_MIN   = 1.0        # пауза между страницами (вежливость к сайтам)
 REQUEST_DELAY_MAX   = 2.5
 POSTS_PER_DAY       = 2
 POSTED_RETENTION_DAYS = 365      # сколько хранить историю публикаций
+HOLIDAY_POST_HOUR   = 9          # с какого часа (Ташкент) постить поздравление
 
 # Время по Ташкенту
 TIMEZONE            = ZoneInfo("Asia/Tashkent")
@@ -69,6 +72,123 @@ CONTACT_BUTTON_URL  = os.environ.get("CONTACT_BUTTON_URL", "https://t.me/Dmitriy
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+}
+
+# ─── Праздники Узбекистана ────────────────────────────────────────────────────
+# Фиксированные праздники: ключ (месяц, день).
+FIXED_HOLIDAYS = {
+    (1, 1): {
+        "name": "Новый год",
+        "title": "С Новым годом!",
+        "emoji": "🎄",
+        "subtitle": "Счастья, тепла и исполнения желаний",
+        "message": ("Пусть наступающий год принесёт здоровье, удачу и тёплые "
+                    "моменты с близкими. Спасибо, что были с нами — впереди "
+                    "ещё больше хорошего!"),
+        "c1": "#1a237e", "c2": "#0d1240", "accent": "#ffd54f",
+    },
+    (1, 14): {
+        "name": "День защитников Родины",
+        "title": "С Днём защитников Родины!",
+        "emoji": "🎖️",
+        "subtitle": "Мужества, чести и мирного неба",
+        "message": ("Благодарим всех, кто оберегает мир и покой нашей страны. "
+                    "Крепкого здоровья, силы духа и мирного неба над головой!"),
+        "c1": "#4b5320", "c2": "#2e3514", "accent": "#d4af37",
+    },
+    (3, 8): {
+        "name": "Международный женский день",
+        "title": "С 8 Марта!",
+        "emoji": "🌷",
+        "subtitle": "Красоты, нежности и весеннего настроения",
+        "message": ("Дорогие женщины, поздравляем вас с праздником весны! Пусть "
+                    "вас окружают забота, внимание и цветы не только сегодня. "
+                    "Будьте счастливы и любимы!"),
+        "c1": "#e91e63", "c2": "#ad1457", "accent": "#ffe0ec",
+    },
+    (3, 21): {
+        "name": "Навруз",
+        "title": "С праздником Навруз!",
+        "emoji": "🌷",
+        "subtitle": "Тепла, изобилия и обновления в каждый дом",
+        "message": ("С праздником весеннего обновления! Пусть Навруз принесёт в "
+                    "каждый дом достаток, здоровье и добрые перемены. "
+                    "Навруз муборак!"),
+        "c1": "#1b8a5a", "c2": "#0b5d3b", "accent": "#ffd166",
+    },
+    (5, 9): {
+        "name": "День Памяти и Почестей",
+        "title": "День Памяти и Почестей",
+        "emoji": "🕊️",
+        "subtitle": "Светлая память и глубокая благодарность",
+        "message": ("Сегодня мы чтим память тех, кто подарил нам мир, и склоняем "
+                    "головы перед их подвигом. Низкий поклон ветеранам. "
+                    "Помним. Гордимся. Благодарим."),
+        "c1": "#7b1e1e", "c2": "#4a1010", "accent": "#e0c097",
+    },
+    (9, 1): {
+        "name": "День Независимости",
+        "title": "С Днём Независимости!",
+        "emoji": "🇺🇿",
+        "subtitle": "Мира, процветания и гордости за нашу страну",
+        "message": ("Поздравляем с главным праздником нашей страны! Желаем "
+                    "Узбекистану процветания, а каждому из нас — мира, "
+                    "благополучия и гордости за свою Родину."),
+        "c1": "#1565c0", "c2": "#0b3d91", "accent": "#9be7ff",
+    },
+    (10, 1): {
+        "name": "День учителя и наставника",
+        "title": "С Днём учителя и наставника!",
+        "emoji": "📚",
+        "subtitle": "Уважения, тепла и благодарных учеников",
+        "message": ("Спасибо всем, кто учит, направляет и вдохновляет. Ваш труд "
+                    "бесценен. Здоровья, терпения и благодарных учеников!"),
+        "c1": "#b9770e", "c2": "#7a4d06", "accent": "#ffe3a3",
+    },
+    (12, 8): {
+        "name": "День Конституции",
+        "title": "С Днём Конституции!",
+        "emoji": "🇺🇿",
+        "subtitle": "Стабильности, законности и благополучия",
+        "message": ("Поздравляем с Днём Конституции Республики Узбекистан! Желаем "
+                    "стабильности, благополучия и уверенности в завтрашнем дне "
+                    "каждой семье."),
+        "c1": "#1976d2", "c2": "#0d47a1", "accent": "#bbdefb",
+    },
+}
+
+# Религиозные (переходящие) праздники — шаблоны.
+MOVABLE_HOLIDAYS = {
+    "ramazan": {
+        "name": "Рамазан хайит",
+        "title": "С праздником Рамазан хайит!",
+        "emoji": "🌙",
+        "subtitle": "Мира, добра и благословения вашему дому",
+        "message": ("Поздравляем с праздником разговения! Пусть этот светлый день "
+                    "принесёт в ваш дом мир, здоровье и благополучие. "
+                    "Рамазон хайит муборак бўлсин!"),
+        "c1": "#0f766e", "c2": "#064e46", "accent": "#ffe08a",
+    },
+    "kurban": {
+        "name": "Курбан хайит",
+        "title": "С праздником Курбан хайит!",
+        "emoji": "🕌",
+        "subtitle": "Милосердия, достатка и благополучия",
+        "message": ("Поздравляем с праздником жертвоприношения! Пусть в вашем доме "
+                    "всегда царят достаток, милосердие и согласие. "
+                    "Қурбон хайит муборак бўлсин!"),
+        "c1": "#15803d", "c2": "#0b5d2b", "accent": "#ffd700",
+    },
+}
+
+# Даты переходящих праздников по годам. Официальные даты объявляет Управление
+# мусульман Узбекистана ближе к празднику — даты на 2027 РАСЧЁТНЫЕ, уточните и
+# при необходимости поправьте. Для 2028+ добавьте новые строки.
+MOVABLE_DATES = {
+    "2026-03-20": "ramazan",   # подтверждено
+    "2026-05-27": "kurban",    # подтверждено
+    "2027-03-10": "ramazan",   # ⚠ расчётно — уточнить
+    "2027-05-17": "kurban",    # ⚠ расчётно — уточнить
 }
 
 # ─── URL категорий ───────────────────────────────────────────────────────────
@@ -192,7 +312,7 @@ def mark_slot_posted(slot_hour: int) -> None:
     state["posted_hours"] = sorted(posted_hours)
     save_state(state)
 
-# ─── История публикаций (url -> дата последней публикации) ────────────────────
+# ─── История публикаций товаров (url -> дата) ─────────────────────────────────
 
 def _parse_ts(ts) -> datetime:
     try:
@@ -217,13 +337,11 @@ def load_posted() -> dict:
     if isinstance(data, dict):
         return data
     if isinstance(data, list):
-        # миграция со старого формата: считаем, что всё опубликовано давно
         old = (datetime.now(TIMEZONE) - timedelta(days=1)).isoformat()
         return {url: old for url in data}
     return {}
 
 def save_posted(posted: dict) -> None:
-    # чистим записи старше POSTED_RETENTION_DAYS, чтобы файл не рос бесконечно
     cutoff = datetime.now(TIMEZONE) - timedelta(days=POSTED_RETENTION_DAYS)
     cleaned = {url: ts for url, ts in posted.items() if _parse_ts(ts) >= cutoff}
     try:
@@ -231,6 +349,33 @@ def save_posted(posted: dict) -> None:
             json.dump(cleaned, f, ensure_ascii=False, indent=2)
     except IOError as e:
         log.error(f"Не удалось сохранить {POSTED_FILE}: {e}")
+
+# ─── Учёт поздравлений (чтобы поздравить раз в праздник) ──────────────────────
+
+def load_holidays_posted() -> set:
+    if not os.path.exists(HOLIDAYS_FILE):
+        return set()
+    try:
+        with open(HOLIDAYS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return set(data) if isinstance(data, list) else set()
+    except (json.JSONDecodeError, IOError) as e:
+        log.warning(f"Не удалось прочитать {HOLIDAYS_FILE}: {e}")
+        return set()
+
+def save_holidays_posted(done: set) -> None:
+    try:
+        with open(HOLIDAYS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(done), f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        log.error(f"Не удалось сохранить {HOLIDAYS_FILE}: {e}")
+
+def get_today_holiday(now: datetime):
+    """Возвращает данные праздника на сегодня или None."""
+    rid = MOVABLE_DATES.get(now.strftime("%Y-%m-%d"))
+    if rid:
+        return MOVABLE_HOLIDAYS.get(rid)
+    return FIXED_HOLIDAYS.get((now.month, now.day))
 
 # ─── Утилиты ─────────────────────────────────────────────────────────────────
 
@@ -263,7 +408,7 @@ def safe_attr(el, attr: str, base_url: str = "") -> str:
 def normalize_name(name: str) -> str:
     return " ".join(name.lower().split())
 
-# ─── Скачивание картинки ──────────────────────────────────────────────────────
+# ─── Скачивание картинки товара ───────────────────────────────────────────────
 
 def _looks_like_image(data: bytes) -> bool:
     if len(data) < 12:
@@ -292,7 +437,6 @@ def fetch_image(url: str):
         log.warning(f"Не удалось скачать картинку {url}: {e}")
         return None
 
-    # Telegram: фото до 10 МБ; слишком маленькое — вероятно заглушка/иконка
     if not (2048 <= len(data) <= 10 * 1024 * 1024):
         log.debug(f"Картинка отброшена по размеру ({len(data)} б): {url}")
         return None
@@ -300,6 +444,108 @@ def fetch_image(url: str):
         log.debug(f"Не похоже на изображение: {url}")
         return None
     return data
+
+# ─── Генерация праздничной открытки ───────────────────────────────────────────
+
+_FONT_BOLD_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+_FONT_REG_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+]
+
+def _font_path(bold: bool):
+    for p in (_FONT_BOLD_PATHS if bold else _FONT_REG_PATHS):
+        if os.path.exists(p):
+            return p
+    return None
+
+def _hex(c: str):
+    c = c.lstrip("#")
+    return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+
+def make_greeting_image(hol: dict):
+    """Возвращает PNG-байты открытки или None (тогда поздравление выйдет текстом)."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        log.info("Pillow не установлен — поздравление выйдет текстом.")
+        return None
+
+    bold_path = _font_path(bold=True)
+    reg_path = _font_path(bold=False) or bold_path
+    if not bold_path:
+        log.info("Шрифт для открытки не найден — поздравление выйдет текстом.")
+        return None
+
+    try:
+        W = H = 1080
+        top, bot = _hex(hol["c1"]), _hex(hol["c2"])
+        img = Image.new("RGB", (W, H))
+        d = ImageDraw.Draw(img)
+        for y in range(H):
+            t = y / (H - 1)
+            d.line([(0, y), (W, y)], fill=(
+                int(top[0] + (bot[0] - top[0]) * t),
+                int(top[1] + (bot[1] - top[1]) * t),
+                int(top[2] + (bot[2] - top[2]) * t),
+            ))
+
+        accent = hol.get("accent", "#ffffff")
+        title_font = ImageFont.truetype(bold_path, 96)
+        sub_font = ImageFont.truetype(reg_path, 44)
+        brand_font = ImageFont.truetype(bold_path, 40)
+
+        def wrap(text, font, max_w):
+            words, lines, cur = text.split(), [], ""
+            for w in words:
+                trial = (cur + " " + w).strip()
+                if d.textlength(trial, font=font) <= max_w:
+                    cur = trial
+                else:
+                    if cur:
+                        lines.append(cur)
+                    cur = w
+            if cur:
+                lines.append(cur)
+            return lines
+
+        # заголовок
+        title_lines = wrap(hol["title"], title_font, W - 200)
+        line_h = title_font.getbbox("Ay")[3] + 18
+        y = (H - line_h * len(title_lines)) // 2 - 40
+        for ln in title_lines:
+            w = d.textlength(ln, font=title_font)
+            d.text(((W - w) / 2, y), ln, font=title_font, fill="#ffffff")
+            y += line_h
+
+        # декоративная линия
+        ly = y + 24
+        d.rectangle([(W / 2 - 90, ly), (W / 2 + 90, ly + 6)], fill=accent)
+
+        # подзаголовок
+        sub = hol.get("subtitle", "")
+        if sub:
+            sy = ly + 40
+            for ln in wrap(sub, sub_font, W - 240):
+                w = d.textlength(ln, font=sub_font)
+                d.text(((W - w) / 2, sy), ln, font=sub_font, fill="#f1f1f1")
+                sy += sub_font.getbbox("Ay")[3] + 12
+
+        # имя компании внизу
+        brand = " ".join(STORE_NAME.upper())
+        w = d.textlength(brand, font=brand_font)
+        d.text(((W - w) / 2, H - 110), brand, font=brand_font, fill=accent)
+
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        log.warning(f"Не удалось сгенерировать открытку: {e}")
+        return None
 
 # ─── Парсер ──────────────────────────────────────────────────────────────────
 
@@ -359,7 +605,7 @@ def parse_all():
                 for item in items:
                     nname = normalize_name(item["name"])
                     if item["url"] in seen_urls or nname in seen_names:
-                        continue  # дубль по ссылке или по названию
+                        continue
                     seen_urls.add(item["url"])
                     seen_names.add(nname)
                     all_products.append(item)
@@ -400,41 +646,38 @@ def format_caption(product: dict) -> str:
         f"{CONTACT_LINE_2}"
     )
 
-async def post_product(bot: Bot, product: dict) -> bool:
-    caption = format_caption(product)
-    keyboard = InlineKeyboardMarkup([
+def build_holiday_caption(hol: dict) -> str:
+    return (
+        f"{hol['emoji']} <b>{hol['title']}</b>\n\n"
+        f"{hol['message']}\n\n"
+        f"С уважением, команда <b>{STORE_NAME}</b> 💙"
+    )
+
+def contact_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Написать нам", url=CONTACT_BUTTON_URL)]
     ])
+
+async def post_product(bot: Bot, product: dict) -> bool:
+    caption = format_caption(product)
+    keyboard = contact_keyboard()
     image = fetch_image(product.get("img", ""))
     sent = False
 
-    # 1. Фото товара с описанием (с откатом на текст, если фото нет/не отправилось)
+    # 1. Фото товара с описанием (с откатом на текст)
     try:
         if image:
-            await bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=image,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
+            await bot.send_photo(chat_id=CHANNEL_ID, photo=image, caption=caption,
+                                 parse_mode="HTML", reply_markup=keyboard)
         else:
-            await bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
+            await bot.send_message(chat_id=CHANNEL_ID, text=caption,
+                                   parse_mode="HTML", reply_markup=keyboard)
         sent = True
     except TelegramError as e:
         log.error(f"Telegram ошибка с фото '{product['name']}': {e}")
         try:
-            await bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
+            await bot.send_message(chat_id=CHANNEL_ID, text=caption,
+                                   parse_mode="HTML", reply_markup=keyboard)
             sent = True
         except TelegramError as e2:
             log.error(f"Повторная ошибка: {e2}")
@@ -443,18 +686,34 @@ async def post_product(bot: Bot, product: dict) -> bool:
     # 2. Карта с локацией магазина (если координаты заданы)
     if sent and STORE_LATITUDE is not None and STORE_LONGITUDE is not None:
         try:
-            await bot.send_venue(
-                chat_id=CHANNEL_ID,
-                latitude=STORE_LATITUDE,
-                longitude=STORE_LONGITUDE,
-                title=STORE_NAME,
-                address=STORE_ADDRESS,
-            )
+            await bot.send_venue(chat_id=CHANNEL_ID, latitude=STORE_LATITUDE,
+                                 longitude=STORE_LONGITUDE, title=STORE_NAME,
+                                 address=STORE_ADDRESS)
             log.info("Локация магазина прикреплена")
         except TelegramError as ve:
             log.warning(f"Не удалось отправить локацию: {ve}")
 
     return sent
+
+async def send_greeting(bot: Bot, caption: str, image) -> bool:
+    keyboard = contact_keyboard()
+    try:
+        if image:
+            await bot.send_photo(chat_id=CHANNEL_ID, photo=image, caption=caption,
+                                 parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await bot.send_message(chat_id=CHANNEL_ID, text=caption,
+                                   parse_mode="HTML", reply_markup=keyboard)
+        return True
+    except TelegramError as e:
+        log.error(f"Не удалось опубликовать поздравление: {e}")
+        try:
+            await bot.send_message(chat_id=CHANNEL_ID, text=caption,
+                                   parse_mode="HTML", reply_markup=keyboard)
+            return True
+        except TelegramError as e2:
+            log.error(f"Повторная ошибка поздравления: {e2}")
+            return False
 
 async def notify_admin(bot: Bot, text: str) -> None:
     if not ADMIN_CHAT_ID:
@@ -464,6 +723,32 @@ async def notify_admin(bot: Bot, text: str) -> None:
     except TelegramError as e:
         log.warning(f"Не удалось отправить алерт администратору: {e}")
 
+async def maybe_post_holiday(bot: Bot) -> None:
+    """Если сегодня праздник и мы ещё не поздравляли — публикуем поздравление."""
+    now = datetime.now(TIMEZONE)
+    hol = get_today_holiday(now)
+    if not hol:
+        return
+    if now.hour < HOLIDAY_POST_HOUR:
+        log.info(f"Сегодня праздник «{hol['name']}», но ещё рано ({now.hour}:00 < {HOLIDAY_POST_HOUR}:00).")
+        return
+
+    key = now.strftime("%Y-%m-%d")
+    done = load_holidays_posted()
+    if key in done:
+        log.info(f"Поздравление с «{hol['name']}» уже было опубликовано.")
+        return
+
+    log.info(f"Публикуем поздравление: {hol['name']}")
+    caption = build_holiday_caption(hol)
+    image = make_greeting_image(hol)
+    if await send_greeting(bot, caption, image):
+        done.add(key)
+        save_holidays_posted(done)
+        log.info(f"─── Поздравление «{hol['name']}» опубликовано ───")
+    else:
+        log.error(f"Не удалось опубликовать поздравление с «{hol['name']}».")
+
 # ─── Главная функция ─────────────────────────────────────────────────────────
 
 async def main():
@@ -471,6 +756,12 @@ async def main():
         log.error("Не заданы TELEGRAM_TOKEN или CHANNEL_ID!")
         return
 
+    bot = Bot(token=TELEGRAM_TOKEN)
+
+    # 0. Праздничное поздравление (раз в праздник, независимо от слотов товаров)
+    await maybe_post_holiday(bot)
+
+    # 1. Обычные посты товаров по слотам
     can_post, slot = should_post_now()
     if not can_post:
         return
@@ -480,9 +771,6 @@ async def main():
     all_products, failed_sources = parse_all()
     log.info(f"Всего товаров: {len(all_products)}, в истории публикаций: {len(posted)}")
 
-    bot = Bot(token=TELEGRAM_TOKEN)
-
-    # Предупреждаем администратора, если какой-то сайт перестал отдавать товары
     if failed_sources:
         msg = ("⚠️ Источники без товаров: " + ", ".join(failed_sources) +
                "\nВозможно, изменилась вёрстка сайта или сайт недоступен.")
