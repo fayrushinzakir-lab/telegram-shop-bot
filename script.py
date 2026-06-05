@@ -41,6 +41,13 @@ TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN", "")
 CHANNEL_ID          = os.environ.get("CHANNEL_ID", "")
 ADMIN_CHAT_ID       = os.environ.get("ADMIN_CHAT_ID", "")   # необязательно: куда слать алерты
 
+# Тестовый режим (через кнопку "Run workflow"): если задан слаг праздника,
+# скрипт сразу отправит это поздравление, не трогая историю и слоты товаров.
+FORCE_HOLIDAY       = os.environ.get("FORCE_HOLIDAY", "").strip()
+if FORCE_HOLIDAY.lower() in ("", "none"):
+    FORCE_HOLIDAY = ""
+TEST_CHAT_ID        = os.environ.get("TEST_CHAT_ID", "").strip()   # куда слать тест (пусто = канал)
+
 POSTED_FILE         = "posted.json"
 STATE_FILE          = "state.json"
 HOLIDAYS_FILE       = "holidays.json"     # какие праздники уже поздравлены
@@ -190,6 +197,20 @@ MOVABLE_DATES = {
     "2027-03-10": "ramazan",   # ⚠ расчётно — уточнить
     "2027-05-17": "kurban",    # ⚠ расчётно — уточнить
 }
+
+# Короткие имена (слаги) праздников — нужны для тестового запуска вручную.
+_FIXED_SLUGS = {
+    (1, 1):   "new_year",
+    (1, 14):  "defenders",
+    (3, 8):   "march8",
+    (3, 21):  "navruz",
+    (5, 9):   "memory_day",
+    (9, 1):   "independence",
+    (10, 1):  "teachers_day",
+    (12, 8):  "constitution",
+}
+HOLIDAYS_BY_SLUG = {slug: FIXED_HOLIDAYS[key] for key, slug in _FIXED_SLUGS.items()}
+HOLIDAYS_BY_SLUG.update(MOVABLE_HOLIDAYS)   # ключи "ramazan", "kurban"
 
 # ─── URL категорий ───────────────────────────────────────────────────────────
 
@@ -695,20 +716,21 @@ async def post_product(bot: Bot, product: dict) -> bool:
 
     return sent
 
-async def send_greeting(bot: Bot, caption: str, image) -> bool:
+async def send_greeting(bot: Bot, caption: str, image, chat_id=None) -> bool:
+    target = chat_id or CHANNEL_ID
     keyboard = contact_keyboard()
     try:
         if image:
-            await bot.send_photo(chat_id=CHANNEL_ID, photo=image, caption=caption,
+            await bot.send_photo(chat_id=target, photo=image, caption=caption,
                                  parse_mode="HTML", reply_markup=keyboard)
         else:
-            await bot.send_message(chat_id=CHANNEL_ID, text=caption,
+            await bot.send_message(chat_id=target, text=caption,
                                    parse_mode="HTML", reply_markup=keyboard)
         return True
     except TelegramError as e:
         log.error(f"Не удалось опубликовать поздравление: {e}")
         try:
-            await bot.send_message(chat_id=CHANNEL_ID, text=caption,
+            await bot.send_message(chat_id=target, text=caption,
                                    parse_mode="HTML", reply_markup=keyboard)
             return True
         except TelegramError as e2:
@@ -722,6 +744,25 @@ async def notify_admin(bot: Bot, text: str) -> None:
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
     except TelegramError as e:
         log.warning(f"Не удалось отправить алерт администратору: {e}")
+
+async def post_test_greeting(bot: Bot) -> None:
+    """Тест: сразу отправить поздравление по выбранному слагу (FORCE_HOLIDAY).
+    Не трогает историю праздников и слоты товаров — можно запускать сколько угодно."""
+    hol = HOLIDAYS_BY_SLUG.get(FORCE_HOLIDAY)
+    if not hol:
+        log.error(f"FORCE_HOLIDAY={FORCE_HOLIDAY!r} не распознан. "
+                  f"Доступно: {', '.join(sorted(HOLIDAYS_BY_SLUG))}")
+        return
+    target = TEST_CHAT_ID or CHANNEL_ID
+    caption = build_holiday_caption(hol)
+    if not TEST_CHAT_ID:
+        caption = "🧪 <i>Предпросмотр праздничного поста</i>\n\n" + caption
+    log.info(f"[ТЕСТ] Поздравление «{hol['name']}» → чат {target}")
+    image = make_greeting_image(hol)
+    if await send_greeting(bot, caption, image, chat_id=target):
+        log.info("[ТЕСТ] Отправлено. История праздников не затронута.")
+    else:
+        log.error("[ТЕСТ] Не удалось отправить.")
 
 async def maybe_post_holiday(bot: Bot) -> None:
     """Если сегодня праздник и мы ещё не поздравляли — публикуем поздравление."""
@@ -757,6 +798,11 @@ async def main():
         return
 
     bot = Bot(token=TELEGRAM_TOKEN)
+
+    # Тестовый режим: ручной запуск с выбранным праздником из выпадающего списка
+    if FORCE_HOLIDAY:
+        await post_test_greeting(bot)
+        return
 
     # 0. Праздничное поздравление (раз в праздник, независимо от слотов товаров)
     await maybe_post_holiday(bot)
