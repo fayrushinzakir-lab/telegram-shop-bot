@@ -488,81 +488,96 @@ def _hex(c: str):
     c = c.lstrip("#")
     return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
 
+def _draw_card(W: int, hol: dict, Image, ImageDraw, ImageFont):
+    """Рисует квадратную открытку размера WxW. Все размеры — доли от W,
+    поэтому можно рисовать крупно и потом уменьшить (для чётких краёв)."""
+    H = W
+    bold_path = _font_path(bold=True)
+    reg_path = _font_path(bold=False) or bold_path
+
+    top, bot = _hex(hol["c1"]), _hex(hol["c2"])
+    img = Image.new("RGB", (W, H))
+    d = ImageDraw.Draw(img)
+    for y in range(H):
+        t = y / (H - 1)
+        d.line([(0, y), (W, y)], fill=(
+            int(top[0] + (bot[0] - top[0]) * t),
+            int(top[1] + (bot[1] - top[1]) * t),
+            int(top[2] + (bot[2] - top[2]) * t),
+        ))
+
+    accent = hol.get("accent", "#ffffff")
+    title_font = ImageFont.truetype(bold_path, round(W * 0.089))
+    sub_font   = ImageFont.truetype(reg_path, round(W * 0.041))
+    brand_font = ImageFont.truetype(bold_path, round(W * 0.037))
+
+    def wrap(text, font, max_w):
+        words, lines, cur = text.split(), [], ""
+        for w in words:
+            trial = (cur + " " + w).strip()
+            if d.textlength(trial, font=font) <= max_w:
+                cur = trial
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        return lines
+
+    # заголовок
+    title_lines = wrap(hol["title"], title_font, W - round(W * 0.185))
+    line_h = title_font.getbbox("Ay")[3] + round(W * 0.017)
+    y = (H - line_h * len(title_lines)) // 2 - round(W * 0.037)
+    for ln in title_lines:
+        w = d.textlength(ln, font=title_font)
+        d.text(((W - w) / 2, y), ln, font=title_font, fill="#ffffff")
+        y += line_h
+
+    # декоративная линия
+    ly = y + round(W * 0.022)
+    hw = round(W * 0.083)
+    th = max(2, round(W * 0.0056))
+    d.rectangle([(W / 2 - hw, ly), (W / 2 + hw, ly + th)], fill=accent)
+
+    # подзаголовок
+    sub = hol.get("subtitle", "")
+    if sub:
+        sy = ly + round(W * 0.037)
+        for ln in wrap(sub, sub_font, W - round(W * 0.222)):
+            w = d.textlength(ln, font=sub_font)
+            d.text(((W - w) / 2, sy), ln, font=sub_font, fill="#f1f1f1")
+            sy += sub_font.getbbox("Ay")[3] + round(W * 0.011)
+
+    # имя компании внизу
+    brand = " ".join(STORE_NAME.upper())
+    w = d.textlength(brand, font=brand_font)
+    d.text(((W - w) / 2, H - round(W * 0.102)), brand, font=brand_font, fill=accent)
+    return img
+
 def make_greeting_image(hol: dict):
-    """Возвращает PNG-байты открытки или None (тогда поздравление выйдет текстом)."""
+    """Возвращает PNG-байты открытки или None (тогда поздравление выйдет текстом).
+    Рисуем в 2× и уменьшаем с LANCZOS — края текста выходят гладкими и чёткими."""
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
         log.info("Pillow не установлен — поздравление выйдет текстом.")
         return None
 
-    bold_path = _font_path(bold=True)
-    reg_path = _font_path(bold=False) or bold_path
-    if not bold_path:
+    if not _font_path(bold=True):
         log.info("Шрифт для открытки не найден — поздравление выйдет текстом.")
         return None
 
     try:
-        W = H = 1080
-        top, bot = _hex(hol["c1"]), _hex(hol["c2"])
-        img = Image.new("RGB", (W, H))
-        d = ImageDraw.Draw(img)
-        for y in range(H):
-            t = y / (H - 1)
-            d.line([(0, y), (W, y)], fill=(
-                int(top[0] + (bot[0] - top[0]) * t),
-                int(top[1] + (bot[1] - top[1]) * t),
-                int(top[2] + (bot[2] - top[2]) * t),
-            ))
+        FINAL = 1280       # итоговый размер (с запасом под сжатие Telegram)
+        SS = 2             # супер-сэмплинг: рисуем крупнее, потом уменьшаем
+        resample = getattr(Image, "Resampling", Image).LANCZOS
 
-        accent = hol.get("accent", "#ffffff")
-        title_font = ImageFont.truetype(bold_path, 96)
-        sub_font = ImageFont.truetype(reg_path, 44)
-        brand_font = ImageFont.truetype(bold_path, 40)
-
-        def wrap(text, font, max_w):
-            words, lines, cur = text.split(), [], ""
-            for w in words:
-                trial = (cur + " " + w).strip()
-                if d.textlength(trial, font=font) <= max_w:
-                    cur = trial
-                else:
-                    if cur:
-                        lines.append(cur)
-                    cur = w
-            if cur:
-                lines.append(cur)
-            return lines
-
-        # заголовок
-        title_lines = wrap(hol["title"], title_font, W - 200)
-        line_h = title_font.getbbox("Ay")[3] + 18
-        y = (H - line_h * len(title_lines)) // 2 - 40
-        for ln in title_lines:
-            w = d.textlength(ln, font=title_font)
-            d.text(((W - w) / 2, y), ln, font=title_font, fill="#ffffff")
-            y += line_h
-
-        # декоративная линия
-        ly = y + 24
-        d.rectangle([(W / 2 - 90, ly), (W / 2 + 90, ly + 6)], fill=accent)
-
-        # подзаголовок
-        sub = hol.get("subtitle", "")
-        if sub:
-            sy = ly + 40
-            for ln in wrap(sub, sub_font, W - 240):
-                w = d.textlength(ln, font=sub_font)
-                d.text(((W - w) / 2, sy), ln, font=sub_font, fill="#f1f1f1")
-                sy += sub_font.getbbox("Ay")[3] + 12
-
-        # имя компании внизу
-        brand = " ".join(STORE_NAME.upper())
-        w = d.textlength(brand, font=brand_font)
-        d.text(((W - w) / 2, H - 110), brand, font=brand_font, fill=accent)
+        big = _draw_card(FINAL * SS, hol, Image, ImageDraw, ImageFont)
+        card = big.resize((FINAL, FINAL), resample)
 
         buf = BytesIO()
-        img.save(buf, format="PNG")
+        card.save(buf, format="PNG", optimize=True)
         return buf.getvalue()
     except Exception as e:
         log.warning(f"Не удалось сгенерировать открытку: {e}")
@@ -657,14 +672,47 @@ def pick_product(all_products: list, posted: dict):
 
 # ─── Telegram ────────────────────────────────────────────────────────────────
 
+# Категория товара → иконка и хэштег (по первому совпадению; порядок важен).
+PRODUCT_CATEGORIES = [
+    # аксессуары "для ноутбука" проверяем раньше ноутбуков, иначе сумка/чехол → #ноутбуки
+    (("сумк", "рюкзак", "чехол"),                                       "🎒", "#аксессуары"),
+    (("ноутбук", "ноут", "notebook", "laptop", "macbook", "ultrabook"), "💻", "#ноутбуки"),
+    (("моноблок", "all-in-one"),                                        "🖥", "#моноблоки"),
+    (("монитор", "monitor", "дисплей"),                                 "🖥", "#мониторы"),
+    (("наушник", "headphone", "headset", "earbud", "earphone",
+      "airpods", "гарнитур"),                                           "🎧", "#наушники"),
+    (("клавиатур", "keyboard"),                                         "⌨️", "#клавиатуры"),
+    (("коврик", "mouse pad", "mousepad"),                               "🖱", "#аксессуары"),
+    (("мышь", "мышк", "mouse"),                                         "🖱", "#мыши"),
+    (("колонк", "speaker", "акустик", "саундбар", "soundbar"),          "🔊", "#аудио"),
+    (("принтер", "printer", "мфу", "сканер"),                           "🖨", "#принтеры"),
+    (("флешк", "флеш", "накопит", "ssd", "жёсткий диск", "жесткий диск"),"💾", "#накопители"),
+    (("планшет", "tablet", "ipad"),                                     "📱", "#планшеты"),
+    (("смартфон", "телефон", "iphone", "galaxy"),                       "📱", "#смартфоны"),
+    (("часы", "watch"),                                                 "⌚", "#гаджеты"),
+    (("веб-камер", "вебкам", "webcam", "камер"),                        "📷", "#аксессуары"),
+    (("компьютер", "системный блок", "системник", "десктоп"),           "🖥", "#компьютеры"),
+]
+
+def product_meta(name: str):
+    low = name.lower()
+    for keys, emoji, tag in PRODUCT_CATEGORIES:
+        if any(k in low for k in keys):
+            return emoji, tag
+    return "🛒", "#техника"
+
 def format_caption(product: dict) -> str:
+    emoji, cat_tag = product_meta(product["name"])
+    brand_tag = "#" + STORE_NAME.replace(" ", "")
     return (
-        f"💻 <b>{product['name']}</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{emoji} <b>{product['name']}</b>\n\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"🏪 <b>{STORE_NAME}</b>\n"
         f"📍 {STORE_ADDRESS}\n\n"
         f"{CONTACT_LINE_1}\n"
-        f"{CONTACT_LINE_2}"
+        f"{CONTACT_LINE_2}\n\n"
+        f"💬 <i>Напишите нам — поможем с выбором</i>\n\n"
+        f"{cat_tag} {brand_tag}"
     )
 
 def build_holiday_caption(hol: dict) -> str:
