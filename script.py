@@ -730,11 +730,24 @@ PRODUCT_CATEGORIES = [
 ]
 
 def product_meta(name: str):
+    """Категория определяется по слову, которое стоит РАНЬШЕ в названии товара.
+    В названиях главный тип почти всегда идёт первым словом, поэтому:
+      «Компьютер игровой + клавиатура + мышь» → #компьютеры
+      «Сумка для ноутбука»                    → #аксессуары (а не #ноутбуки)
+      «Наушники для компьютера»               → #наушники   (а не #компьютеры)
+    При таком подходе порядок строк в PRODUCT_CATEGORIES уже не влияет на итог."""
     low = name.lower()
+    best = None
+    best_pos = len(low) + 1
     for keys, emoji, tag in PRODUCT_CATEGORIES:
-        if any(k in low for k in keys):
-            return emoji, tag
-    return "🛒", "#техника"
+        # самое раннее вхождение любого из ключевых слов этой категории
+        positions = [low.find(k) for k in keys if k in low]
+        if positions:
+            pos = min(positions)
+            if pos < best_pos:
+                best_pos = pos
+                best = (emoji, tag)
+    return best or ("🛒", "#техника")
 
 def format_caption(product: dict) -> str:
     emoji, cat_tag = product_meta(product["name"])
